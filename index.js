@@ -8,12 +8,12 @@ const {
 } = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const GITHUB_OWNER = process.env.GITHUB_OWNER;
-const GITHUB_REPO = process.env.GITHUB_REPO;
+const DEFAULT_GITHUB_OWNER = process.env.GITHUB_OWNER;
+const DEFAULT_GITHUB_REPO = process.env.GITHUB_REPO;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const PORT = process.env.PORT || 3000;
 
-if (!TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
+if (!TOKEN || !DEFAULT_GITHUB_OWNER || !DEFAULT_GITHUB_REPO) {
   console.error('Missing required environment variables.');
   process.exit(1);
 }
@@ -38,12 +38,20 @@ const client = new Client({
 
 const recentReplies = new Set();
 
-// Matches #123 but NOT #100.5 or #1.2.3
-const ISSUE_REGEX = /(^|[^\w])#(\d+)(?![\d.])/g;
+const EXACT_MESSAGE_RESPONSES = new Map([
+  ['update?', 'update.'],
+  ['update.', 'update?'],
+  ['update', 'update!'],
+  ['undapte?', 'undapte.'],
+  ['undapte.', 'undapte?'],
+  ['undapte', 'undapte!'],
+]);
 
-// Matches commit hashes 7 to 40 hex chars
-// Avoid matching inside larger words
-const COMMIT_REGEX = /(^|[^a-fA-F0-9])([a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g;
+// small cache so we don't keep listing org repos on every bare SHA
+const orgRepoCache = {
+  fetchedAt: 0,
+  repos: [],
+};
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -53,6 +61,7 @@ function githubHeaders() {
   const headers = {
     'User-Agent': 'discord-gh-link-bot',
     Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
   };
 
   if (GITHUB_TOKEN) {
@@ -62,8 +71,161 @@ function githubHeaders() {
   return headers;
 }
 
-async function fetchGitHubIssue(number) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/issues/${number}`;
+function truncate(text, maxLength) {
+  if (!text) return '';
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, maxLength - 3)}...`;
+}
+
+function stripCodeBlocks(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ');
+}
+
+function isValidRepoName(value) {
+  return /^[A-Za-z0-9_.-]+$/.test(value);
+}
+
+function isValidCommitHash(value) {
+  return /^[a-fA-F0-9]{7,40}$/.test(value);
+}
+
+function normalizeOwnerRepo(owner, repo) {
+  if (!owner || !repo) return null;
+  if (!isValidRepoName(owner) || !isValidRepoName(repo)) return null;
+  return { owner, repo };
+}
+
+function extractIssueRef(content) {
+  const patterns = [
+    // owner/repo/#123
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/#(?<number>\d+)(?![\d.])/g,
+    // owner/repo#123
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)#(?<number>\d+)(?![\d.])/g,
+    // repo/#123
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)\/#(?<number>\d+)(?![\d.])/g,
+    // repo#123
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)#(?<number>\d+)(?![\d.])/g,
+    // #123
+    /(^|[^\w])#(?<number>\d+)(?![\d.])/g,
+  ];
+
+  for (const regex of patterns) {
+    for (const match of content.matchAll(regex)) {
+      const owner = match.groups?.owner || null;
+      const repo = match.groups?.repo || null;
+      const number = match.groups?.number || null;
+
+      if (!number) continue;
+
+      // #123 -> default repo
+      if (!owner && !repo) {
+        return {
+          owner: DEFAULT_GITHUB_OWNER,
+          repo: DEFAULT_GITHUB_REPO,
+          number,
+        };
+      }
+
+      // repo#123 or repo/#123 -> default owner + repo
+      if (!owner && repo) {
+        if (!isValidRepoName(repo)) continue;
+        return {
+          owner: DEFAULT_GITHUB_OWNER,
+          repo,
+          number,
+        };
+      }
+
+      // owner/repo#123 or owner/repo/#123 -> any explicit owner/repo
+      if (owner && repo) {
+        const normalized = normalizeOwnerRepo(owner, repo);
+        if (!normalized) continue;
+
+        return {
+          owner: normalized.owner,
+          repo: normalized.repo,
+          number,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractCommitRef(content) {
+  const patterns = [
+    // owner/repo@abcdef1
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)@(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+    // repo@abcdef1
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)@(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+
+    // owner/repo/commit/abcdef1
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/commit\/(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+    // repo/commit/abcdef1
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)\/commit\/(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+
+    // owner/repo/abcdef1
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+    // repo/abcdef1
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)\/(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+
+    // bare hash
+    /(^|[^a-fA-F0-9])(?<hash>[a-fA-F0-9]{7,40})(?![a-fA-F0-9])/g,
+  ];
+
+  for (const regex of patterns) {
+    for (const match of content.matchAll(regex)) {
+      const owner = match.groups?.owner || null;
+      const repo = match.groups?.repo || null;
+      const hash = match.groups?.hash || null;
+
+      if (!hash || !isValidCommitHash(hash)) continue;
+      if (/^\d+$/.test(hash)) continue;
+
+      // bare hash -> search default org later
+      if (!owner && !repo) {
+        return {
+          owner: null,
+          repo: null,
+          hash,
+          searchDefaultOwner: true,
+        };
+      }
+
+      // repo@hash / repo/commit/hash / repo/hash
+      if (!owner && repo) {
+        if (!isValidRepoName(repo)) continue;
+        return {
+          owner: DEFAULT_GITHUB_OWNER,
+          repo,
+          hash,
+          searchDefaultOwner: false,
+        };
+      }
+
+      // owner/repo@hash / owner/repo/commit/hash / owner/repo/hash
+      if (owner && repo) {
+        const normalized = normalizeOwnerRepo(owner, repo);
+        if (!normalized) continue;
+        return {
+          owner: normalized.owner,
+          repo: normalized.repo,
+          hash,
+          searchDefaultOwner: false,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+async function fetchGitHubIssue(owner, repo, number) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/issues/${number}`;
   const response = await fetch(url, { headers: githubHeaders() });
 
   if (response.status === 404) return null;
@@ -74,11 +236,25 @@ async function fetchGitHubIssue(number) {
   return response.json();
 }
 
-async function fetchGitHubCommit(hash) {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/commits/${hash}`;
+async function fetchGitHubPullRequest(owner, repo, number) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/pulls/${number}`;
   const response = await fetch(url, { headers: githubHeaders() });
 
   if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`GitHub pull request API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function fetchGitHubCommit(owner, repo, hash) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/commits/${hash}`;
+  const response = await fetch(url, { headers: githubHeaders() });
+
+  // Treat "not found / invalid for this repo" as a miss, not a crash.
+  if (response.status === 404 || response.status === 422) return null;
+
   if (!response.ok) {
     throw new Error(`GitHub commit API error: ${response.status}`);
   }
@@ -86,52 +262,165 @@ async function fetchGitHubCommit(hash) {
   return response.json();
 }
 
-function truncate(text, maxLength) {
-  if (!text) return '';
-  const clean = text.replace(/\s+/g, ' ').trim();
-  if (clean.length <= maxLength) return clean;
-  return `${clean.slice(0, maxLength - 3)}...`;
+async function listOrgRepos(owner) {
+  const now = Date.now();
+  const cacheAgeMs = 5 * 60 * 1000;
+
+  if (
+    owner === DEFAULT_GITHUB_OWNER &&
+    orgRepoCache.repos.length > 0 &&
+    now - orgRepoCache.fetchedAt < cacheAgeMs
+  ) {
+    return orgRepoCache.repos;
+  }
+
+  const repos = [];
+  let page = 1;
+
+  while (page <= 10) {
+    const url = `https://api.github.com/orgs/${owner}/repos?per_page=100&page=${page}&type=all`;
+    const response = await fetch(url, { headers: githubHeaders() });
+
+    if (!response.ok) {
+      throw new Error(`GitHub org repos API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!Array.isArray(data) || data.length === 0) break;
+
+    for (const repo of data) {
+      if (repo?.name) repos.push(repo.name);
+    }
+
+    if (data.length < 100) break;
+    page += 1;
+  }
+
+  if (owner === DEFAULT_GITHUB_OWNER) {
+    orgRepoCache.repos = repos;
+    orgRepoCache.fetchedAt = now;
+  }
+
+  return repos;
 }
 
-function buildIssueEmbed(issue) {
+async function resolveCommitRef(commitRef) {
+  // Explicit repo given
+  if (!commitRef.searchDefaultOwner) {
+    const commit = await fetchGitHubCommit(commitRef.owner, commitRef.repo, commitRef.hash);
+    if (!commit) return null;
+
+    return {
+      owner: commitRef.owner,
+      repo: commitRef.repo,
+      commit,
+    };
+  }
+
+  // Bare SHA: first try default repo
+  const direct = await fetchGitHubCommit(DEFAULT_GITHUB_OWNER, DEFAULT_GITHUB_REPO, commitRef.hash);
+  if (direct) {
+    return {
+      owner: DEFAULT_GITHUB_OWNER,
+      repo: DEFAULT_GITHUB_REPO,
+      commit: direct,
+    };
+  }
+
+  // Then try all repos in the default owner/org
+  const repos = await listOrgRepos(DEFAULT_GITHUB_OWNER);
+
+  for (const repo of repos) {
+    if (repo === DEFAULT_GITHUB_REPO) continue;
+
+    const commit = await fetchGitHubCommit(DEFAULT_GITHUB_OWNER, repo, commitRef.hash);
+    if (commit) {
+      return {
+        owner: DEFAULT_GITHUB_OWNER,
+        repo,
+        commit,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getIssueVisualState(issue, prData) {
   const isPR = !!issue.pull_request;
 
-  let color = 0x5865f2;
-  if (isPR) color = 0x8250df; // purple
-  else if (issue.state === 'open') color = 0x238636; // green
-  else color = 0xda3633; // red
+  if (issue.state === 'open') {
+    return {
+      color: 0x238636,
+      statusText: isPR ? 'Open PR' : 'Open Issue',
+      emoji: '🟢',
+    };
+  }
 
-  const typeLabel = isPR ? 'Pull Request' : 'Issue';
-  const statusLabel =
-    issue.state === 'open' ? 'Open' : issue.state === 'closed' ? 'Closed' : issue.state;
+  if (isPR) {
+    const merged = !!prData?.merged;
+
+    if (merged) {
+      return {
+        color: 0x8250df,
+        statusText: 'Merged PR',
+        emoji: '🟣',
+      };
+    }
+
+    return {
+      color: 0xda3633,
+      statusText: 'Closed PR',
+      emoji: '🔴',
+    };
+  }
+
+  if (issue.state_reason === 'not_planned') {
+    return {
+      color: 0xda3633,
+      statusText: 'Not Planned',
+      emoji: '🔴',
+    };
+  }
+
+  return {
+    color: 0x8250df,
+    statusText: 'Closed Issue',
+    emoji: '🟣',
+  };
+}
+
+function buildIssueEmbed(issue, prData, owner, repo) {
+  const isPR = !!issue.pull_request;
+  const visual = getIssueVisualState(issue, prData);
 
   const embed = new EmbedBuilder()
-    .setColor(color)
-    .setTitle(`#${issue.number} — ${truncate(issue.title, 180)}`)
+    .setColor(visual.color)
+    .setTitle(`${visual.emoji} #${issue.number} — ${truncate(issue.title, 180)}`)
     .setURL(issue.html_url)
     .addFields(
-      { name: 'Type', value: typeLabel, inline: true },
-      { name: 'Status', value: statusLabel, inline: true },
-      {
-        name: 'Author',
-        value: issue.user?.login ? `\`${issue.user.login}\`` : 'Unknown',
-        inline: true,
-      }
+      { name: 'Type', value: isPR ? 'Pull Request' : 'Issue', inline: true },
+      { name: 'Status', value: visual.statusText, inline: true },
+      { name: 'Repo', value: `\`${owner}/${repo}\``, inline: true }
     )
     .setFooter({
-      text: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+      text: `${owner}/${repo}`,
       iconURL: 'https://github.githubassets.com/favicons/favicon.png',
     })
     .setTimestamp(new Date(issue.updated_at));
 
-  if (issue.user?.avatar_url) {
-    embed.setThumbnail(issue.user.avatar_url);
+  if (issue.user?.login) {
+    embed.setAuthor({
+      name: issue.user.login,
+      iconURL: issue.user.avatar_url,
+      url: issue.user.html_url,
+    });
   }
 
   return embed;
 }
 
-function buildCommitEmbed(commitData) {
+function buildCommitEmbed(commitData, owner, repo) {
   const sha = commitData.sha;
   const shortSha = sha.slice(0, 7);
   const commit = commitData.commit || {};
@@ -141,20 +430,19 @@ function buildCommitEmbed(commitData) {
     commit.committer?.name ||
     'Unknown';
 
-  const message = commit.message || 'No commit message';
-  const firstLine = message.split('\n')[0];
+  const firstLine = (commit.message || 'No commit message').split('\n')[0];
 
   const embed = new EmbedBuilder()
-    .setColor(0xf59e0b) // amber
-    .setTitle(`${shortSha} — ${truncate(firstLine, 180)}`)
+    .setColor(0xf59e0b)
+    .setTitle(`🟠 ${shortSha} — ${truncate(firstLine, 180)}`)
     .setURL(commitData.html_url)
     .addFields(
       { name: 'Type', value: 'Commit', inline: true },
       { name: 'Author', value: `\`${authorName}\``, inline: true },
-      { name: 'SHA', value: `\`${shortSha}\``, inline: true }
+      { name: 'Repo', value: `\`${owner}/${repo}\``, inline: true }
     )
     .setFooter({
-      text: `${GITHUB_OWNER}/${GITHUB_REPO}`,
+      text: `${owner}/${repo}`,
       iconURL: 'https://github.githubassets.com/favicons/favicon.png',
     });
 
@@ -163,47 +451,40 @@ function buildCommitEmbed(commitData) {
     embed.setTimestamp(new Date(commitDate));
   }
 
-  if (commitData.author?.avatar_url) {
-    embed.setThumbnail(commitData.author.avatar_url);
+  if (commitData.author?.login) {
+    embed.setAuthor({
+      name: commitData.author.login,
+      iconURL: commitData.author.avatar_url,
+      url: commitData.author.html_url,
+    });
   }
 
   return embed;
-}
-
-function getFirstIssueNumber(content) {
-  const matches = [...content.matchAll(ISSUE_REGEX)];
-  if (matches.length === 0) return null;
-  return matches[0][2];
-}
-
-function getFirstCommitHash(content) {
-  const matches = [...content.matchAll(COMMIT_REGEX)];
-  if (matches.length === 0) return null;
-
-  for (const match of matches) {
-    const hash = match[2];
-
-    // Skip all-numeric strings just in case
-    if (/^\d+$/.test(hash)) continue;
-
-    return hash;
-  }
-
-  return null;
 }
 
 client.on('messageCreate', async (message) => {
   try {
     if (!message.guild) return;
     if (!message.author || message.author.bot) return;
-    if (!message.content) return;
+    if (typeof message.content !== 'string') return;
 
-    const issueNumber = getFirstIssueNumber(message.content);
-    const commitHash = getFirstCommitHash(message.content);
+    const exactReply = EXACT_MESSAGE_RESPONSES.get(message.content);
+    if (exactReply) {
+      await message.reply({
+        content: exactReply,
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
 
-    if (!issueNumber && !commitHash) return;
+    const cleanContent = stripCodeBlocks(message.content);
 
-    const dedupeKey = `${message.channel.id}:${message.id}:${issueNumber || ''}:${commitHash || ''}`;
+    const issueRef = extractIssueRef(cleanContent);
+    const commitRef = extractCommitRef(cleanContent);
+
+    if (!issueRef && !commitRef) return;
+
+    const dedupeKey = `${message.channel.id}:${message.id}:${issueRef ? `${issueRef.owner}/${issueRef.repo}#${issueRef.number}` : ''}:${commitRef ? `${commitRef.owner || 'search'}/${commitRef.repo || 'search'}@${commitRef.hash}` : ''}`;
     if (recentReplies.has(dedupeKey)) return;
 
     recentReplies.add(dedupeKey);
@@ -211,17 +492,23 @@ client.on('messageCreate', async (message) => {
 
     const embeds = [];
 
-    if (issueNumber) {
-      const issue = await fetchGitHubIssue(issueNumber);
+    if (issueRef) {
+      const issue = await fetchGitHubIssue(issueRef.owner, issueRef.repo, issueRef.number);
+
       if (issue) {
-        embeds.push(buildIssueEmbed(issue));
+        let prData = null;
+        if (issue.pull_request) {
+          prData = await fetchGitHubPullRequest(issueRef.owner, issueRef.repo, issueRef.number);
+        }
+
+        embeds.push(buildIssueEmbed(issue, prData, issueRef.owner, issueRef.repo));
       }
     }
 
-    if (commitHash) {
-      const commit = await fetchGitHubCommit(commitHash);
-      if (commit) {
-        embeds.push(buildCommitEmbed(commit));
+    if (commitRef) {
+      const resolved = await resolveCommitRef(commitRef);
+      if (resolved) {
+        embeds.push(buildCommitEmbed(resolved.commit, resolved.owner, resolved.repo));
       }
     }
 
