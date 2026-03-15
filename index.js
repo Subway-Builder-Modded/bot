@@ -537,13 +537,7 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    if (embeds.length === 0) {
-      await message.reply({
-        content: 'No GitHub match found.',
-        allowedMentions: { repliedUser: false },
-      });
-      return;
-    }
+    if (embeds.length === 0) return;
 
     await message.reply({
       embeds,
