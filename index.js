@@ -7,10 +7,10 @@ const {
   EmbedBuilder,
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const DEFAULT_GITHUB_OWNER = process.env.GITHUB_OWNER;
-const DEFAULT_GITHUB_REPO = process.env.GITHUB_REPO;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const TOKEN = (process.env.DISCORD_TOKEN || '').trim();
+const DEFAULT_GITHUB_OWNER = (process.env.GITHUB_OWNER || '').trim();
+const DEFAULT_GITHUB_REPO = (process.env.GITHUB_REPO || '').trim();
+const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const PORT = process.env.PORT || 3000;
 
 if (!TOKEN || !DEFAULT_GITHUB_OWNER || !DEFAULT_GITHUB_REPO) {
@@ -55,6 +55,12 @@ const orgRepoCache = {
 
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
+  console.log('GitHub config:', {
+    owner: DEFAULT_GITHUB_OWNER,
+    repo: DEFAULT_GITHUB_REPO,
+    hasGitHubToken: !!GITHUB_TOKEN,
+    githubTokenLength: GITHUB_TOKEN.length,
+  });
 });
 
 function githubHeaders() {
@@ -228,8 +234,15 @@ async function fetchGitHubIssue(owner, repo, number) {
   const url = `https://api.github.com/repos/${owner}/${repo}/issues/${number}`;
   const response = await fetch(url, { headers: githubHeaders() });
 
-  if (response.status === 404) return null;
   if (!response.ok) {
+    const body = await response.text();
+    console.error('fetchGitHubIssue failed', {
+      url,
+      status: response.status,
+      body,
+    });
+
+    if (response.status === 404) return null;
     throw new Error(`GitHub issue API error: ${response.status}`);
   }
 
@@ -240,8 +253,15 @@ async function fetchGitHubPullRequest(owner, repo, number) {
   const url = `https://api.github.com/repos/${owner}/${repo}/pulls/${number}`;
   const response = await fetch(url, { headers: githubHeaders() });
 
-  if (response.status === 404) return null;
   if (!response.ok) {
+    const body = await response.text();
+    console.error('fetchGitHubPullRequest failed', {
+      url,
+      status: response.status,
+      body,
+    });
+
+    if (response.status === 404) return null;
     throw new Error(`GitHub pull request API error: ${response.status}`);
   }
 
@@ -252,10 +272,15 @@ async function fetchGitHubCommit(owner, repo, hash) {
   const url = `https://api.github.com/repos/${owner}/${repo}/commits/${hash}`;
   const response = await fetch(url, { headers: githubHeaders() });
 
-  // Treat "not found / invalid for this repo" as a miss, not a crash.
-  if (response.status === 404 || response.status === 422) return null;
-
   if (!response.ok) {
+    const body = await response.text();
+    console.error('fetchGitHubCommit failed', {
+      url,
+      status: response.status,
+      body,
+    });
+
+    if (response.status === 404 || response.status === 422) return null;
     throw new Error(`GitHub commit API error: ${response.status}`);
   }
 
@@ -512,7 +537,13 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    if (embeds.length === 0) return;
+    if (embeds.length === 0) {
+      await message.reply({
+        content: 'No GitHub match found.',
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
 
     await message.reply({
       embeds,
