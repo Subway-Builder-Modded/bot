@@ -677,6 +677,39 @@ async function findForumChannelByName(guild, forumName) {
   );
 }
 
+function getThreadIssueNumber(threadName) {
+  const match = String(threadName || '').match(/\(#(\d+)\)\s*$/);
+  return match ? match[1] : null;
+}
+
+function getThreadUrl(thread) {
+  return thread.url || `https://discord.com/channels/${thread.guildId}/${thread.id}`;
+}
+
+async function findExistingIssueThread(forumChannel, issueNumber) {
+  const target = String(issueNumber);
+
+  const active = await forumChannel.threads.fetchActive();
+  for (const thread of active.threads.values()) {
+    if (getThreadIssueNumber(thread.name) === target) {
+      return thread;
+    }
+  }
+
+  try {
+    const archived = await forumChannel.threads.fetchArchived();
+    for (const thread of archived.threads.values()) {
+      if (getThreadIssueNumber(thread.name) === target) {
+        return thread;
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to fetch archived forum threads:', error.message);
+  }
+
+  return null;
+}
+
 async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, messageText) {
   const project = PROJECTS[projectKey];
   if (!project) {
@@ -686,6 +719,26 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
   const issueNumber = normalizeIssueNumber(issueNumberRaw);
   if (!issueNumber) {
     throw new Error('Issue number must be in the form 123 or #123.');
+  }
+
+  const forumChannel = await findForumChannelByName(interaction.guild, project.forumName);
+  if (!forumChannel) {
+    throw new Error(`Could not find forum channel "${project.forumName}".`);
+  }
+
+  const memberPerms = forumChannel.permissionsFor(interaction.member);
+  if (!memberPerms || !memberPerms.has(PermissionsBitField.Flags.ViewChannel)) {
+    throw new Error(`You don't have permission to view #${forumChannel.name}.`);
+  }
+
+  const existingThread = await findExistingIssueThread(forumChannel, issueNumber);
+  if (existingThread) {
+    return {
+      thread: existingThread,
+      mainIssue: null,
+      forumChannel,
+      existed: true,
+    };
   }
 
   const mainRef = {
@@ -715,16 +768,6 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     if (built) embeds.push(built.embed);
   }
 
-  const forumChannel = await findForumChannelByName(interaction.guild, project.forumName);
-  if (!forumChannel) {
-    throw new Error(`Could not find forum channel "${project.forumName}".`);
-  }
-
-  const memberPerms = forumChannel.permissionsFor(interaction.member);
-  if (!memberPerms || !memberPerms.has(PermissionsBitField.Flags.ViewChannel)) {
-    throw new Error(`You don't have permission to view #${forumChannel.name}.`);
-  }
-
   const userMention = `<@${interaction.user.id}>`;
   const postContent = messageText ? `${userMention}\n${messageText}` : userMention;
 
@@ -743,6 +786,7 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     thread,
     mainIssue: builtMain.issue,
     forumChannel,
+    existed: false,
   };
 }
 
@@ -760,7 +804,9 @@ client.on('interactionCreate', async (interaction) => {
     const result = await createPrDiscussionPost(interaction, projectKey, issue, message);
 
     await interaction.editReply({
-      content: `Created forum post: ${result.thread.url}`,
+      content: result.existed
+        ? `Forum post already exists: ${getThreadUrl(result.thread)}`
+        : `Created forum post: ${getThreadUrl(result.thread)}`,
     });
   } catch (error) {
     console.error('Error handling slash command:', error);
