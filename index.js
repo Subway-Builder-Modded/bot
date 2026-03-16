@@ -96,6 +96,8 @@ const PROJECTS = {
   },
 };
 
+const RAILYARD_RELEASE_FORUM = 'railyard-changelog-qe';
+
 
 
 client.once('ready', async () => {
@@ -116,7 +118,7 @@ client.once('ready', async () => {
 });
 
 async function registerSlashCommands() {
-  const command = new SlashCommandBuilder()
+  const prCommand = new SlashCommandBuilder()
     .setName('pr')
     .setDescription('Create an issue/PR discussion forum post')
     .setDMPermission(false)
@@ -143,11 +145,22 @@ async function registerSlashCommands() {
         .setRequired(false)
     );
 
+  const releaseCommand = new SlashCommandBuilder()
+    .setName('release')
+    .setDescription('Create release changelog + QE forum posts')
+    .setDMPermission(false)
+    .addStringOption((option) =>
+      option
+        .setName('version')
+        .setDescription('Release version')
+        .setRequired(true)
+    );
+
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
   await rest.put(
     Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-    { body: [command.toJSON()] }
+    { body: [prCommand.toJSON(), releaseCommand.toJSON()] }
   );
 }
 
@@ -686,6 +699,31 @@ function getThreadUrl(thread) {
   return thread.url || `https://discord.com/channels/${thread.guildId}/${thread.id}`;
 }
 
+async function findExistingThreadByName(forumChannel, threadName) {
+  const targetName = String(threadName || '').trim().toLowerCase();
+  if (!targetName) return null;
+
+  const active = await forumChannel.threads.fetchActive();
+  for (const thread of active.threads.values()) {
+    if (String(thread.name || '').trim().toLowerCase() === targetName) {
+      return thread;
+    }
+  }
+
+  try {
+    const archived = await forumChannel.threads.fetchArchived();
+    for (const thread of archived.threads.values()) {
+      if (String(thread.name || '').trim().toLowerCase() === targetName) {
+        return thread;
+      }
+    }
+  } catch (error) {
+    console.warn('Unable to fetch archived forum threads:', error.message);
+  }
+
+  return null;
+}
+
 async function findExistingIssueThread(forumChannel, issueNumber) {
   const target = String(issueNumber);
 
@@ -790,23 +828,83 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
   };
 }
 
+async function createReleaseDiscussionPosts(interaction, versionRaw) {
+  const version = String(versionRaw || '').trim();
+  if (!version) {
+    throw new Error('Version is required.');
+  }
+
+  const forumChannel = await findForumChannelByName(interaction.guild, RAILYARD_RELEASE_FORUM);
+  if (!forumChannel) {
+    throw new Error(`Could not find forum channel "${RAILYARD_RELEASE_FORUM}".`);
+  }
+
+  const memberPerms = forumChannel.permissionsFor(interaction.member);
+  if (!memberPerms || !memberPerms.has(PermissionsBitField.Flags.ViewChannel)) {
+    throw new Error(`You don't have permission to view #${forumChannel.name}.`);
+  }
+
+  const userMention = `<@${interaction.user.id}>`;
+  const postNames = [`${version} Changelog`, `${version} QE`];
+  const posts = [];
+
+  for (const name of postNames) {
+    const existingThread = await findExistingThreadByName(forumChannel, name);
+    if (existingThread) {
+      posts.push({ thread: existingThread, existed: true });
+      continue;
+    }
+
+    const thread = await forumChannel.threads.create({
+      name,
+      message: {
+        content: userMention,
+        allowedMentions: { users: [interaction.user.id] },
+      },
+    });
+
+    posts.push({ thread, existed: false });
+  }
+
+  return {
+    forumChannel,
+    posts,
+  };
+}
+
 client.on('interactionCreate', async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'pr') return;
-
-    const projectKey = interaction.options.getString('project', true);
-    const issue = interaction.options.getInteger('issue', true);
-    const message = interaction.options.getString('message', false) ?? '';
+    if (interaction.commandName !== 'pr' && interaction.commandName !== 'release') return;
 
     await interaction.deferReply({ ephemeral: true });
 
-    const result = await createPrDiscussionPost(interaction, projectKey, issue, message);
+    if (interaction.commandName === 'pr') {
+      const projectKey = interaction.options.getString('project', true);
+      const issue = interaction.options.getInteger('issue', true);
+      const message = interaction.options.getString('message', false) ?? '';
+
+      const result = await createPrDiscussionPost(interaction, projectKey, issue, message);
+
+      await interaction.editReply({
+        content: result.existed
+          ? `Forum post already exists: ${getThreadUrl(result.thread)}`
+          : `Created forum post: ${getThreadUrl(result.thread)}`,
+      });
+      return;
+    }
+
+    const version = interaction.options.getString('version', true);
+    const result = await createReleaseDiscussionPosts(interaction, version);
+    const lines = result.posts.map((post, index) => {
+      const label = index === 0 ? 'Changelog' : 'QE';
+      return post.existed
+        ? `${label} post already exists: ${getThreadUrl(post.thread)}`
+        : `Created ${label} post: ${getThreadUrl(post.thread)}`;
+    });
 
     await interaction.editReply({
-      content: result.existed
-        ? `Forum post already exists: ${getThreadUrl(result.thread)}`
-        : `Created forum post: ${getThreadUrl(result.thread)}`,
+      content: lines.join('\n'),
     });
   } catch (error) {
     console.error('Error handling slash command:', error);
