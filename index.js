@@ -7,6 +7,7 @@ const {
   EmbedBuilder,
   ChannelType,
   SlashCommandBuilder,
+  PermissionsBitField,
   REST,
   Routes,
 } = require('discord.js');
@@ -59,11 +60,12 @@ const recentReplies = new Set();
 
 const EXACT_MESSAGE_RESPONSES = new Map([
   ['update?', 'update.'],
-  ['update.', 'update?'],
-  ['update', 'update!'],
+  ['update.', 'update.'],
+  ['update', 'update.'],
   ['undapte?', 'undapte.'],
-  ['undapte.', 'undapte?'],
-  ['undapte', 'undapte!'],
+  ['undapte.', 'undapte.'],
+  ['undapte', 'undapte.'],
+  ['.env', 'fuck you'],
 ]);
 
 const orgRepoCache = {
@@ -209,6 +211,15 @@ function dedupeIssueRefs(issueRefs) {
   return result;
 }
 
+const REPO_ALIASES = {
+  registry: 'The-Railyard',
+};
+
+function resolveRepoAlias(repo) {
+  if (!repo) return repo;
+  return REPO_ALIASES[repo.toLowerCase()] || repo;
+}
+
 function expandIssueNumberChain(numberChain) {
   return String(numberChain || '').match(/\d+/g) || [];
 }
@@ -226,17 +237,19 @@ function pushIssueRef(refs, owner, repo, number) {
   }
 
   if (!owner && repo) {
-    if (!isValidRepoName(repo)) return;
+    const resolvedRepo = resolveRepoAlias(repo);
+    if (!isValidRepoName(resolvedRepo)) return;
     refs.push({
       owner: DEFAULT_GITHUB_OWNER,
-      repo,
+      repo: resolvedRepo,
       number,
     });
     return;
   }
 
   if (owner && repo) {
-    const normalized = normalizeOwnerRepo(owner, repo);
+    const resolvedRepo = resolveRepoAlias(repo);
+    const normalized = normalizeOwnerRepo(owner, resolvedRepo);
     if (!normalized) return;
 
     refs.push({
@@ -249,6 +262,10 @@ function pushIssueRef(refs, owner, repo, number) {
 
 function extractIssueRefs(content) {
   const refs = [];
+  // Track absolute positions of '#' chars already claimed by a higher-priority pattern
+  // so bare '#123' can't double-fire when it was already part of 'repo/#123'.
+  const consumedHashPos = new Set();
+
   const patterns = [
     /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
     /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
@@ -270,12 +287,27 @@ function extractIssueRefs(content) {
       const number = match.groups?.number || null;
 
       if (chain) {
-        for (const chainedNumber of expandIssueNumberChain(chain)) {
-          pushIssueRef(refs, owner, repo, chainedNumber);
+        // Find each '#' in the chain and claim its absolute position.
+        const chainStartInContent = match.index + match[0].indexOf(chain);
+        let scanOffset = 0;
+        for (const num of expandIssueNumberChain(chain)) {
+          const localHash = chain.indexOf('#', scanOffset);
+          if (localHash === -1) break;
+          const absHash = chainStartInContent + localHash;
+          if (!consumedHashPos.has(absHash)) {
+            consumedHashPos.add(absHash);
+            pushIssueRef(refs, owner, repo, num);
+          }
+          scanOffset = localHash + 1;
         }
         continue;
       }
 
+      // Single-number pattern: locate the '#' in the matched text.
+      const hashOffsetInMatch = match[0].indexOf('#');
+      const absHash = match.index + hashOffsetInMatch;
+      if (consumedHashPos.has(absHash)) continue;
+      consumedHashPos.add(absHash);
       pushIssueRef(refs, owner, repo, number);
     }
   }
@@ -688,14 +720,22 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     throw new Error(`Could not find forum channel "${project.forumName}".`);
   }
 
+  const memberPerms = forumChannel.permissionsFor(interaction.member);
+  if (!memberPerms || !memberPerms.has(PermissionsBitField.Flags.ViewChannel)) {
+    throw new Error(`You don't have permission to view #${forumChannel.name}.`);
+  }
+
+  const userMention = `<@${interaction.user.id}>`;
+  const postContent = messageText ? `${userMention}\n${messageText}` : userMention;
+
   const threadName = buildForumPostTitle(builtMain.issue);
 
   const thread = await forumChannel.threads.create({
     name: threadName,
     message: {
-      ...(messageText ? { content: messageText } : {}),
+      content: postContent,
       embeds,
-      allowedMentions: { parse: [] },
+      allowedMentions: { users: [interaction.user.id] },
     },
   });
 
