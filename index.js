@@ -37,6 +37,13 @@ http
   })
   .listen(PORT, () => {
     console.log(`Health server listening on ${PORT}`);
+  })
+  .on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Health server port ${PORT} already in use — skipping.`);
+    } else {
+      console.error('Health server error:', err);
+    }
   });
 
 const client = new Client({
@@ -80,28 +87,14 @@ const PROJECTS = {
     repo: 'website',
     forumName: 'website-pr-discussions',
   },
+  bot: {
+    owner: 'Subway-Builder-Modded',
+    repo: 'bot',
+    forumName: 'bot-pr-discussions',
+  },
 };
 
-function addProjectPrSubcommand(command, projectKey) {
-  return command.addSubcommand((subcommand) =>
-    subcommand
-      .setName(projectKey)
-      .setDescription(`Create an issue/PR discussion post for ${projectKey}`)
-      .addIntegerOption((option) =>
-        option
-          .setName('issue')
-          .setDescription('Issue or PR number')
-          .setMinValue(1)
-          .setRequired(true)
-      )
-      .addStringOption((option) =>
-        option
-          .setName('message')
-          .setDescription('Message for the forum post')
-          .setRequired(true)
-      )
-  );
-}
+
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -121,14 +114,32 @@ client.once('ready', async () => {
 });
 
 async function registerSlashCommands() {
-  let command = new SlashCommandBuilder()
+  const command = new SlashCommandBuilder()
     .setName('pr')
     .setDescription('Create an issue/PR discussion forum post')
-    .setDMPermission(false);
-
-  for (const projectKey of Object.keys(PROJECTS)) {
-    command = addProjectPrSubcommand(command, projectKey);
-  }
+    .setDMPermission(false)
+    .addStringOption((option) =>
+      option
+        .setName('project')
+        .setDescription('Project to create the post for')
+        .setRequired(true)
+        .addChoices(
+          ...Object.keys(PROJECTS).map((key) => ({ name: key, value: key }))
+        )
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('issue')
+        .setDescription('Issue or PR number')
+        .setMinValue(1)
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('message')
+        .setDescription('Message for the forum post (optional)')
+        .setRequired(false)
+    );
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
@@ -656,12 +667,13 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     throw new Error(`Could not find issue/PR #${issueNumber} in ${project.owner}/${project.repo}.`);
   }
 
-  const messageIssueRefs = extractIssueRefs(stripCodeBlocks(messageText))
-    .map((ref) => ({
-      owner: project.owner,
-      repo: project.repo,
-      number: ref.number,
-    }));
+  const messageIssueRefs = messageText
+    ? extractIssueRefs(stripCodeBlocks(messageText)).map((ref) => ({
+        owner: project.owner,
+        repo: project.repo,
+        number: ref.number,
+      }))
+    : [];
 
   const allRefs = dedupeIssueRefs([mainRef, ...messageIssueRefs]);
   const embeds = [];
@@ -681,7 +693,7 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
   const thread = await forumChannel.threads.create({
     name: threadName,
     message: {
-      content: messageText,
+      ...(messageText ? { content: messageText } : {}),
       embeds,
       allowedMentions: { parse: [] },
     },
@@ -699,14 +711,13 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
     if (interaction.commandName !== 'pr') return;
 
-    const subcommand = interaction.options.getSubcommand();
-    const issue = interaction.options.getInteger('issue', false)
-      ?? interaction.options.getString('issue', false);
-    const message = interaction.options.getString('message', true);
+    const projectKey = interaction.options.getString('project', true);
+    const issue = interaction.options.getInteger('issue', true);
+    const message = interaction.options.getString('message', false) ?? '';
 
     await interaction.deferReply({ ephemeral: true });
 
-    const result = await createPrDiscussionPost(interaction, subcommand, issue, message);
+    const result = await createPrDiscussionPost(interaction, projectKey, issue, message);
 
     await interaction.editReply({
       content: `Created forum post: ${result.thread.url}`,
