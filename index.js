@@ -82,6 +82,27 @@ const PROJECTS = {
   },
 };
 
+function addProjectPrSubcommand(command, projectKey) {
+  return command.addSubcommand((subcommand) =>
+    subcommand
+      .setName(projectKey)
+      .setDescription(`Create an issue/PR discussion post for ${projectKey}`)
+      .addIntegerOption((option) =>
+        option
+          .setName('issue')
+          .setDescription('Issue or PR number')
+          .setMinValue(1)
+          .setRequired(true)
+      )
+      .addStringOption((option) =>
+        option
+          .setName('message')
+          .setDescription('Message for the forum post')
+          .setRequired(true)
+      )
+  );
+}
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log('GitHub config:', {
@@ -100,60 +121,14 @@ client.once('ready', async () => {
 });
 
 async function registerSlashCommands() {
-  const command = new SlashCommandBuilder()
+  let command = new SlashCommandBuilder()
     .setName('pr')
-    .setDescription('Create a PR discussion forum post')
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName('railyard')
-        .setDescription('Create a PR discussion post for railyard')
-        .addStringOption((option) =>
-          option
-            .setName('issue')
-            .setDescription('Issue or PR number, like #123 or 123')
-            .setRequired(true)
-        )
-        .addStringOption((option) =>
-          option
-            .setName('message')
-            .setDescription('Message for the forum post')
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName('registry')
-        .setDescription('Create a PR discussion post for registry')
-        .addStringOption((option) =>
-          option
-            .setName('issue')
-            .setDescription('Issue or PR number, like #123 or 123')
-            .setRequired(true)
-        )
-        .addStringOption((option) =>
-          option
-            .setName('message')
-            .setDescription('Message for the forum post')
-            .setRequired(true)
-        )
-    )
-    .addSubcommand((subcommand) =>
-      subcommand
-        .setName('website')
-        .setDescription('Create a PR discussion post for website')
-        .addStringOption((option) =>
-          option
-            .setName('issue')
-            .setDescription('Issue or PR number, like #123 or 123')
-            .setRequired(true)
-        )
-        .addStringOption((option) =>
-          option
-            .setName('message')
-            .setDescription('Message for the forum post')
-            .setRequired(true)
-        )
-    );
+    .setDescription('Create an issue/PR discussion forum post')
+    .setDMPermission(false);
+
+  for (const projectKey of Object.keys(PROJECTS)) {
+    command = addProjectPrSubcommand(command, projectKey);
+  }
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
@@ -223,9 +198,52 @@ function dedupeIssueRefs(issueRefs) {
   return result;
 }
 
+function expandIssueNumberChain(numberChain) {
+  return String(numberChain || '').match(/\d+/g) || [];
+}
+
+function pushIssueRef(refs, owner, repo, number) {
+  if (!number) return;
+
+  if (!owner && !repo) {
+    refs.push({
+      owner: DEFAULT_GITHUB_OWNER,
+      repo: DEFAULT_GITHUB_REPO,
+      number,
+    });
+    return;
+  }
+
+  if (!owner && repo) {
+    if (!isValidRepoName(repo)) return;
+    refs.push({
+      owner: DEFAULT_GITHUB_OWNER,
+      repo,
+      number,
+    });
+    return;
+  }
+
+  if (owner && repo) {
+    const normalized = normalizeOwnerRepo(owner, repo);
+    if (!normalized) return;
+
+    refs.push({
+      owner: normalized.owner,
+      repo: normalized.repo,
+      number,
+    });
+  }
+}
+
 function extractIssueRefs(content) {
   const refs = [];
   const patterns = [
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
+    /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)\/(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
+    /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
+    /(^|[^\w])(?<chain>#\d+(?:\/#\d+)+)(?![\d.])/g,
     /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)\/#(?<number>\d+)(?![\d.])/g,
     /(^|[^\w/-])(?<owner>[A-Za-z0-9_.-]+)\/(?<repo>[A-Za-z0-9_.-]+)#(?<number>\d+)(?![\d.])/g,
     /(^|[^\w/-])(?<repo>[A-Za-z0-9_.-]+)\/#(?<number>\d+)(?![\d.])/g,
@@ -237,38 +255,17 @@ function extractIssueRefs(content) {
     for (const match of content.matchAll(regex)) {
       const owner = match.groups?.owner || null;
       const repo = match.groups?.repo || null;
+      const chain = match.groups?.chain || null;
       const number = match.groups?.number || null;
 
-      if (!number) continue;
-
-      if (!owner && !repo) {
-        refs.push({
-          owner: DEFAULT_GITHUB_OWNER,
-          repo: DEFAULT_GITHUB_REPO,
-          number,
-        });
+      if (chain) {
+        for (const chainedNumber of expandIssueNumberChain(chain)) {
+          pushIssueRef(refs, owner, repo, chainedNumber);
+        }
         continue;
       }
 
-      if (!owner && repo) {
-        if (!isValidRepoName(repo)) continue;
-        refs.push({
-          owner: DEFAULT_GITHUB_OWNER,
-          repo,
-          number,
-        });
-        continue;
-      }
-
-      if (owner && repo) {
-        const normalized = normalizeOwnerRepo(owner, repo);
-        if (!normalized) continue;
-        refs.push({
-          owner: normalized.owner,
-          repo: normalized.repo,
-          number,
-        });
-      }
+      pushIssueRef(refs, owner, repo, number);
     }
   }
 
@@ -542,6 +539,13 @@ function buildIssueEmbed(issue, prData, owner, repo) {
   return embed;
 }
 
+function buildForumPostTitle(issue) {
+  const suffix = ` (#${issue.number})`;
+  const maxNameLength = 100;
+  const maxTitleLength = Math.max(1, maxNameLength - suffix.length);
+  return `${truncate(issue.title, maxTitleLength)}${suffix}`;
+}
+
 function buildCommitEmbed(commitData, owner, repo) {
   const sha = commitData.sha;
   const shortSha = sha.slice(0, 7);
@@ -672,7 +676,7 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     throw new Error(`Could not find forum channel "${project.forumName}".`);
   }
 
-  const threadName = `${truncate(builtMain.issue.title, 80)} (#${builtMain.issue.number})`;
+  const threadName = buildForumPostTitle(builtMain.issue);
 
   const thread = await forumChannel.threads.create({
     name: threadName,
@@ -696,7 +700,8 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.commandName !== 'pr') return;
 
     const subcommand = interaction.options.getSubcommand();
-    const issue = interaction.options.getString('issue', true);
+    const issue = interaction.options.getInteger('issue', false)
+      ?? interaction.options.getString('issue', false);
     const message = interaction.options.getString('message', true);
 
     await interaction.deferReply({ ephemeral: true });
