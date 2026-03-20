@@ -23,6 +23,9 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_WEBHOOK_SECRET = (process.env.GITHUB_WEBHOOK_SECRET || '').trim();
 const GITHUB_WEBHOOK_PATH = (process.env.GITHUB_WEBHOOK_PATH || '/github/webhook').trim() || '/github/webhook';
 const DISCORD_GITHUB_EVENTS_CHANNEL_ID = (process.env.DISCORD_GITHUB_EVENTS_CHANNEL_ID || '').trim();
+const DISCORD_WEBHOOK_URL = (process.env.DISCORD_WEBHOOK_URL || '').trim();
+const DISCORD_USERNAME = (process.env.DISCORD_USERNAME || '').trim();
+const DISCORD_AVATAR_URL = (process.env.DISCORD_AVATAR_URL || '').trim();
 
 if (
   !TOKEN ||
@@ -365,6 +368,32 @@ function buildGitHubWebhookEmbed(event, payload) {
   };
 }
 
+function buildGitHubWebhookPayload(event, payload) {
+  return {
+    username: DISCORD_USERNAME || 'GitHub Org Bot',
+    avatar_url: DISCORD_AVATAR_URL || undefined,
+    embeds: [buildGitHubWebhookEmbed(event, payload)],
+  };
+}
+
+async function sendGitHubWebhookViaDiscordWebhook(event, payload) {
+  if (!DISCORD_WEBHOOK_URL) {
+    throw new Error('Missing DISCORD_WEBHOOK_URL.');
+  }
+
+  const discordBody = buildGitHubWebhookPayload(event, payload);
+  const response = await fetch(DISCORD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(discordBody),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Discord webhook API error: ${response.status} ${text}`);
+  }
+}
+
 async function sendGitHubWebhookToDiscord(event, payload) {
   const destinationId = DISCORD_GITHUB_EVENTS_CHANNEL_ID;
   if (!destinationId) {
@@ -380,20 +409,47 @@ async function sendGitHubWebhookToDiscord(event, payload) {
   await channel.send({ embeds: [embed] });
 }
 
+async function deliverGitHubWebhook(event, payload) {
+  if (DISCORD_GITHUB_EVENTS_CHANNEL_ID) {
+    try {
+      await sendGitHubWebhookToDiscord(event, payload);
+      return 'bot-channel';
+    } catch (error) {
+      if (!DISCORD_WEBHOOK_URL) {
+        throw error;
+      }
+      console.warn('[webhook] bot-channel delivery failed, falling back to Discord webhook', {
+        error: error.message,
+      });
+      await sendGitHubWebhookViaDiscordWebhook(event, payload);
+      return 'discord-webhook-fallback';
+    }
+  }
+
+  await sendGitHubWebhookViaDiscordWebhook(event, payload);
+  return 'discord-webhook';
+}
+
 async function handleGitHubWebhookRequest(req, res) {
+  const deliveryHeader = req.headers['x-github-delivery'];
+  const eventHeader = req.headers['x-github-event'];
+  const deliveryId = Array.isArray(deliveryHeader) ? deliveryHeader[0] : deliveryHeader || 'unknown';
+  const eventName = Array.isArray(eventHeader) ? eventHeader[0] : eventHeader || 'unknown';
+
   if (req.method !== 'POST') {
+    console.warn('[webhook] rejected non-POST request', { deliveryId, event: eventName, method: req.method });
     writePlainResponse(res, 405, 'Only POST allowed');
     return;
   }
 
   const rawBody = await readRequestBody(req);
   const signatureHeader = req.headers['x-hub-signature-256'];
-  const eventHeader = req.headers['x-github-event'];
   const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader || '';
   const event = Array.isArray(eventHeader) ? eventHeader[0] : eventHeader || 'unknown';
   const valid = verifyGitHubSignature(rawBody, signature, GITHUB_WEBHOOK_SECRET);
 
   if (!valid) {
+    console.warn('[webhook] bad signature', { deliveryId, event });
     writePlainResponse(res, 401, 'Bad signature');
     return;
   }
@@ -402,26 +458,39 @@ async function handleGitHubWebhookRequest(req, res) {
   try {
     payload = JSON.parse(rawBody);
   } catch {
+    console.warn('[webhook] invalid json', { deliveryId, event });
     writePlainResponse(res, 400, 'Invalid JSON');
     return;
   }
 
   if (event === 'ping') {
+    console.log('[webhook] ping acknowledged', { deliveryId });
     writePlainResponse(res, 200, 'pong');
     return;
   }
 
   if (!client.isReady()) {
+    console.warn('[webhook] bot not ready', { deliveryId, event });
     writePlainResponse(res, 503, 'Bot not ready');
     return;
   }
 
   try {
-    await sendGitHubWebhookToDiscord(event, payload);
+    const mode = await deliverGitHubWebhook(event, payload);
+    console.log('[webhook] delivered to discord', { deliveryId, event, mode });
     writePlainResponse(res, 200, 'ok');
   } catch (error) {
+    console.error('[webhook] discord delivery failed', { deliveryId, event, error: error.message });
     writePlainResponse(res, 500, `Discord error: ${error.message}`);
   }
+}
+
+function isGitHubWebhookRequest(req, requestPathname, webhookPath) {
+  const signatureHeader = req.headers['x-hub-signature-256'];
+  const eventHeader = req.headers['x-github-event'];
+  const hasGitHubHeaders = !!signatureHeader || !!eventHeader;
+  if (hasGitHubHeaders) return true;
+  return req.method === 'POST' && requestPathname === webhookPath;
 }
 
 function startHttpServer() {
@@ -432,7 +501,7 @@ function startHttpServer() {
       try {
         const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
-        if (requestUrl.pathname === webhookPath) {
+        if (isGitHubWebhookRequest(req, requestUrl.pathname, webhookPath)) {
           await handleGitHubWebhookRequest(req, res);
           return;
         }
@@ -447,6 +516,12 @@ function startHttpServer() {
     })
     .listen(PORT, () => {
       console.log(`Health + webhook server listening on ${PORT} (webhook path: ${webhookPath})`);
+      console.log('Webhook config:', {
+        webhookPath,
+        hasWebhookSecret: !!GITHUB_WEBHOOK_SECRET,
+        discordGithubEventsChannelId: DISCORD_GITHUB_EVENTS_CHANNEL_ID || null,
+        hasDiscordWebhookUrl: !!DISCORD_WEBHOOK_URL,
+      });
     })
     .on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
