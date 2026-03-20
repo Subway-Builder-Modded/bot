@@ -1,5 +1,6 @@
 require('dotenv').config();
 const http = require('http');
+const crypto = require('crypto');
 const {
   Client,
   GatewayIntentBits,
@@ -19,6 +20,9 @@ const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || '').trim();
 const DISCORD_CLIENT_ID = (process.env.DISCORD_CLIENT_ID || '').trim();
 const DISCORD_GUILD_ID = (process.env.DISCORD_GUILD_ID || '').trim();
 const PORT = process.env.PORT || 3000;
+const GITHUB_WEBHOOK_SECRET = (process.env.GITHUB_WEBHOOK_SECRET || '').trim();
+const GITHUB_WEBHOOK_PATH = (process.env.GITHUB_WEBHOOK_PATH || '/github/webhook').trim() || '/github/webhook';
+const DISCORD_GITHUB_EVENTS_CHANNEL_ID = (process.env.DISCORD_GITHUB_EVENTS_CHANNEL_ID || '').trim();
 
 if (
   !TOKEN ||
@@ -30,22 +34,6 @@ if (
   console.error('Missing required environment variables.');
   process.exit(1);
 }
-
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
-  })
-  .listen(PORT, () => {
-    console.log(`Health server listening on ${PORT}`);
-  })
-  .on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`Health server port ${PORT} already in use — skipping.`);
-    } else {
-      console.error('Health server error:', err);
-    }
-  });
 
 const client = new Client({
   intents: [
@@ -97,6 +85,377 @@ const PROJECTS = {
 };
 
 const RAILYARD_RELEASE_FORUM = 'railyard-changelog-qe';
+
+function normalizeWebhookPath(pathname) {
+  const trimmed = String(pathname || '').trim();
+  if (!trimmed) return '/github/webhook';
+  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+}
+
+function writePlainResponse(res, statusCode, body) {
+  res.writeHead(statusCode, { 'Content-Type': 'text/plain' });
+  res.end(body);
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => {
+      body += chunk;
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
+
+function timingSafeEqualString(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+
+  const aBuffer = Buffer.from(a, 'utf8');
+  const bBuffer = Buffer.from(b, 'utf8');
+  return crypto.timingSafeEqual(aBuffer, bBuffer);
+}
+
+function verifyGitHubSignature(body, signatureHeader, secret) {
+  if (!secret) return false;
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
+
+  const digest = crypto.createHmac('sha256', secret).update(body, 'utf8').digest('hex');
+  const expected = `sha256=${digest}`;
+  return timingSafeEqualString(expected, signatureHeader);
+}
+
+function truncateWebhookText(value, max) {
+  if (!value) return '';
+  const text = String(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
+}
+
+function buildGitHubWebhookDescription(event, payload) {
+  if (event === 'issues') {
+    return `Issue **${payload.action || 'updated'}**${payload.issue?.number ? ` • #${payload.issue.number}` : ''}`;
+  }
+
+  if (event === 'issue_comment') {
+    const body = payload.comment?.body ? `\n\n${truncateWebhookText(payload.comment.body, 300)}` : '';
+    return `Issue comment **${payload.action || 'created'}**${body}`;
+  }
+
+  if (event === 'pull_request') {
+    return `Pull request **${payload.action || 'updated'}**${payload.pull_request?.number ? ` • #${payload.pull_request.number}` : ''}`;
+  }
+
+  if (event === 'pull_request_review') {
+    return `Pull request review **${payload.action || 'submitted'}**`;
+  }
+
+  if (event === 'pull_request_review_comment') {
+    const body = payload.comment?.body ? `\n\n${truncateWebhookText(payload.comment.body, 300)}` : '';
+    return `Review comment **${payload.action || 'created'}**${body}`;
+  }
+
+  if (event === 'pull_request_review_thread') {
+    return `Review thread **${payload.action || 'updated'}**`;
+  }
+
+  if (event === 'release') {
+    return `Release **${payload.action || 'published'}**`;
+  }
+
+  if (event === 'deployment' || event === 'deployment_status') {
+    return `Deployment event **${payload.action || 'updated'}**`;
+  }
+
+  if (event === 'milestone') {
+    return `Milestone **${payload.action || 'updated'}**`;
+  }
+
+  if (event === 'repository_ruleset') {
+    return `Repository ruleset **${payload.action || 'updated'}**`;
+  }
+
+  if (event === 'page_build') {
+    return 'GitHub Pages build event';
+  }
+
+  if (event === 'repository') {
+    return `Repository **${payload.action || 'updated'}**`;
+  }
+
+  if (event === 'visibility_change') {
+    return 'Repository visibility changed';
+  }
+
+  if (event === 'issue_dependencies') {
+    return 'Issue dependency updated';
+  }
+
+  if (event === 'organization') {
+    return `Organization event **${payload.action || 'updated'}**`;
+  }
+
+  return 'GitHub event received';
+}
+
+function buildGitHubWebhookExtraFields(event, payload) {
+  const fields = [];
+
+  if (payload.issue?.number) {
+    fields.push({ name: 'Issue #', value: String(payload.issue.number), inline: true });
+  }
+
+  if (payload.pull_request?.number) {
+    fields.push({ name: 'PR #', value: String(payload.pull_request.number), inline: true });
+  }
+
+  if (payload.release?.tag_name) {
+    fields.push({ name: 'Tag', value: payload.release.tag_name, inline: true });
+  }
+
+  if (event === 'deployment' || event === 'deployment_status') {
+    if (payload.deployment?.environment) {
+      fields.push({ name: 'Environment', value: payload.deployment.environment, inline: true });
+    }
+    if (payload.deployment_status?.state) {
+      fields.push({ name: 'State', value: payload.deployment_status.state, inline: true });
+    }
+  }
+
+  if (event === 'page_build') {
+    if (payload.build?.status) {
+      fields.push({ name: 'Build Status', value: payload.build.status, inline: true });
+    }
+    if (payload.build?.commit) {
+      fields.push({ name: 'Commit', value: `\`${String(payload.build.commit).slice(0, 7)}\``, inline: true });
+    }
+  }
+
+  if (event === 'repository_ruleset' && payload.repository_ruleset?.name) {
+    fields.push({ name: 'Ruleset', value: payload.repository_ruleset.name, inline: false });
+  }
+
+  if (event === 'milestone' && payload.milestone?.description) {
+    fields.push({
+      name: 'Milestone Notes',
+      value: truncateWebhookText(payload.milestone.description, 500),
+      inline: false,
+    });
+  }
+
+  if (payload.comment?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.comment.html_url})`, inline: false });
+  } else if (payload.review?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.review.html_url})`, inline: false });
+  } else if (payload.pull_request?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.pull_request.html_url})`, inline: false });
+  } else if (payload.issue?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.issue.html_url})`, inline: false });
+  } else if (payload.release?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.release.html_url})`, inline: false });
+  } else if (payload.repository?.html_url) {
+    fields.push({ name: 'Link', value: `[Open on GitHub](${payload.repository.html_url})`, inline: false });
+  }
+
+  return fields;
+}
+
+function getGitHubWebhookColor(event, action) {
+  if (action === 'opened' || action === 'created' || action === 'published' || action === 'submitted') {
+    return 5763719;
+  }
+  if (action === 'closed' || action === 'deleted' || action === 'dismissed' || action === 'removed') {
+    return 15548997;
+  }
+  if (action === 'reopened' || action === 'restored') {
+    return 3447003;
+  }
+
+  switch (event) {
+    case 'pull_request':
+    case 'pull_request_review':
+    case 'pull_request_review_comment':
+    case 'pull_request_review_thread':
+      return 10181046;
+    case 'issues':
+    case 'issue_comment':
+    case 'issue_dependencies':
+      return 15844367;
+    case 'release':
+      return 15105570;
+    case 'deployment':
+    case 'deployment_status':
+    case 'page_build':
+      return 3066993;
+    case 'repository_ruleset':
+    case 'repository':
+    case 'visibility_change':
+    case 'organization':
+      return 9807270;
+    default:
+      return 7506394;
+  }
+}
+
+function buildGitHubWebhookEmbed(event, payload) {
+  const repo = payload.repository?.full_name || 'Unknown repo';
+  const repoUrl = payload.repository?.html_url || null;
+  const org = payload.organization?.login || null;
+  const actor = payload.sender?.login || 'unknown';
+  const actorUrl = payload.sender?.html_url || null;
+  const actorAvatar = payload.sender?.avatar_url || null;
+  const action = payload.action || 'triggered';
+
+  const title =
+    payload.issue?.title ||
+    payload.pull_request?.title ||
+    payload.release?.name ||
+    payload.release?.tag_name ||
+    payload.milestone?.title ||
+    payload.repository?.name ||
+    `${event} event`;
+
+  const url =
+    payload.comment?.html_url ||
+    payload.review?.html_url ||
+    payload.pull_request?.html_url ||
+    payload.issue?.html_url ||
+    payload.release?.html_url ||
+    payload.repository?.html_url ||
+    repoUrl;
+
+  const description = buildGitHubWebhookDescription(event, payload);
+  const color = getGitHubWebhookColor(event, action);
+
+  const fields = [
+    { name: 'Event', value: event, inline: true },
+    { name: 'Action', value: action, inline: true },
+    { name: 'Actor', value: actorUrl ? `[${actor}](${actorUrl})` : actor, inline: true },
+    { name: 'Repository', value: repoUrl ? `[${repo}](${repoUrl})` : repo, inline: true },
+  ];
+
+  if (org) {
+    fields.push({ name: 'Organization', value: org, inline: true });
+  }
+
+  fields.push(...buildGitHubWebhookExtraFields(event, payload));
+
+  return {
+    title: truncateWebhookText(title, 256),
+    url: url || undefined,
+    description: truncateWebhookText(description, 4096),
+    color,
+    author: {
+      name: actor,
+      url: actorUrl || undefined,
+      icon_url: actorAvatar || undefined,
+    },
+    fields: fields.slice(0, 25).map((field) => ({
+      name: truncateWebhookText(field.name, 256),
+      value: truncateWebhookText(field.value || '—', 1024),
+      inline: !!field.inline,
+    })),
+    footer: {
+      text: `${repo} • GitHub webhook`,
+    },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+async function sendGitHubWebhookToDiscord(event, payload) {
+  const destinationId = DISCORD_GITHUB_EVENTS_CHANNEL_ID;
+  if (!destinationId) {
+    throw new Error('Missing DISCORD_GITHUB_EVENTS_CHANNEL_ID.');
+  }
+
+  const channel = await client.channels.fetch(destinationId);
+  if (!channel || !channel.isTextBased()) {
+    throw new Error(`Destination ${destinationId} is not a text-based channel/thread.`);
+  }
+
+  const embed = buildGitHubWebhookEmbed(event, payload);
+  await channel.send({ embeds: [embed] });
+}
+
+async function handleGitHubWebhookRequest(req, res) {
+  if (req.method !== 'POST') {
+    writePlainResponse(res, 405, 'Only POST allowed');
+    return;
+  }
+
+  const rawBody = await readRequestBody(req);
+  const signatureHeader = req.headers['x-hub-signature-256'];
+  const eventHeader = req.headers['x-github-event'];
+  const signature = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader || '';
+  const event = Array.isArray(eventHeader) ? eventHeader[0] : eventHeader || 'unknown';
+  const valid = verifyGitHubSignature(rawBody, signature, GITHUB_WEBHOOK_SECRET);
+
+  if (!valid) {
+    writePlainResponse(res, 401, 'Bad signature');
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    writePlainResponse(res, 400, 'Invalid JSON');
+    return;
+  }
+
+  if (event === 'ping') {
+    writePlainResponse(res, 200, 'pong');
+    return;
+  }
+
+  if (!client.isReady()) {
+    writePlainResponse(res, 503, 'Bot not ready');
+    return;
+  }
+
+  try {
+    await sendGitHubWebhookToDiscord(event, payload);
+    writePlainResponse(res, 200, 'ok');
+  } catch (error) {
+    writePlainResponse(res, 500, `Discord error: ${error.message}`);
+  }
+}
+
+function startHttpServer() {
+  const webhookPath = normalizeWebhookPath(GITHUB_WEBHOOK_PATH);
+
+  http
+    .createServer(async (req, res) => {
+      try {
+        const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+        if (requestUrl.pathname === webhookPath) {
+          await handleGitHubWebhookRequest(req, res);
+          return;
+        }
+
+        writePlainResponse(res, 200, 'ok');
+      } catch (error) {
+        console.error('HTTP server request error:', error);
+        if (!res.headersSent) {
+          writePlainResponse(res, 500, 'internal error');
+        }
+      }
+    })
+    .listen(PORT, () => {
+      console.log(`Health + webhook server listening on ${PORT} (webhook path: ${webhookPath})`);
+    })
+    .on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.warn(`Health server port ${PORT} already in use — skipping.`);
+      } else {
+        console.error('Health server error:', err);
+      }
+    });
+}
 
 
 
@@ -659,16 +1018,22 @@ async function buildIssueEmbedFromRef(issueRef) {
   };
 }
 
-async function buildEmbedsForMessageContent(content) {
-  const cleanContent = stripCodeBlocks(content);
-  const issueRefs = extractIssueRefs(cleanContent);
-  const commitRef = extractCommitRef(cleanContent);
+async function buildIssueEmbedsFromRefs(issueRefs) {
   const embeds = [];
 
   for (const issueRef of issueRefs) {
     const built = await buildIssueEmbedFromRef(issueRef);
     if (built) embeds.push(built.embed);
   }
+
+  return embeds;
+}
+
+async function buildEmbedsForMessageContent(content) {
+  const cleanContent = stripCodeBlocks(content);
+  const issueRefs = extractIssueRefs(cleanContent);
+  const commitRef = extractCommitRef(cleanContent);
+  const embeds = await buildIssueEmbedsFromRefs(issueRefs);
 
   if (commitRef) {
     const resolved = await resolveCommitRef(commitRef);
@@ -799,12 +1164,7 @@ async function createPrDiscussionPost(interaction, projectKey, issueNumberRaw, m
     : [];
 
   const allRefs = dedupeIssueRefs([mainRef, ...messageIssueRefs]);
-  const embeds = [];
-
-  for (const ref of allRefs) {
-    const built = await buildIssueEmbedFromRef(ref);
-    if (built) embeds.push(built.embed);
-  }
+  const embeds = await buildIssueEmbedsFromRefs(allRefs);
 
   const userMention = `<@${interaction.user.id}>`;
   const postContent = messageText ? `${userMention}\n${messageText}` : userMention;
@@ -957,12 +1317,7 @@ client.on('messageCreate', async (message) => {
     recentReplies.add(dedupeKey);
     setTimeout(() => recentReplies.delete(dedupeKey), 5 * 60 * 1000);
 
-    const embeds = [];
-
-    for (const issueRef of issueRefs) {
-      const built = await buildIssueEmbedFromRef(issueRef);
-      if (built) embeds.push(built.embed);
-    }
+    const embeds = await buildIssueEmbedsFromRefs(issueRefs);
 
     if (commitRef) {
       const resolved = await resolveCommitRef(commitRef);
@@ -982,4 +1337,5 @@ client.on('messageCreate', async (message) => {
   }
 });
 
+startHttpServer();
 client.login(TOKEN);
