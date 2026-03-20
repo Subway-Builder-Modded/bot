@@ -48,15 +48,19 @@ const client = new Client({
 });
 
 const recentReplies = new Set();
+const SUSCAT_IMAGE_URL = 'https://subwaybuildermodded.com/images/art/suscat.jpg';
 
-const EXACT_MESSAGE_RESPONSES = new Map([
+const EXACT_TEXT_RESPONSES = new Map([
   ['update?', 'update.'],
   ['update.', 'update.'],
   ['update', 'update.'],
   ['undapte?', 'undapte.'],
   ['undapte.', 'undapte.'],
   ['undapte', 'undapte.'],
-  ['.env', 'fuck you'],
+]);
+const EXACT_IMAGE_RESPONSES = new Map([
+  ['.env', SUSCAT_IMAGE_URL],
+  ['suscat', SUSCAT_IMAGE_URL],
 ]);
 
 const orgRepoCache = {
@@ -1363,10 +1367,19 @@ client.on('messageCreate', async (message) => {
     if (!message.author || message.author.bot) return;
     if (typeof message.content !== 'string') return;
 
-    const exactReply = EXACT_MESSAGE_RESPONSES.get(message.content);
-    if (exactReply) {
+    const exactTextReply = EXACT_TEXT_RESPONSES.get(message.content);
+    if (exactTextReply) {
       await message.reply({
-        content: exactReply,
+        content: exactTextReply,
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
+
+    const exactImageReply = EXACT_IMAGE_RESPONSES.get(message.content);
+    if (exactImageReply) {
+      await message.reply({
+        files: [exactImageReply],
         allowedMentions: { repliedUser: false },
       });
       return;
