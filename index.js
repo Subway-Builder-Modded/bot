@@ -92,6 +92,9 @@ const PROJECTS = {
 };
 
 const RAILYARD_RELEASE_FORUM = 'railyard-changelog-qe';
+const RAILYARD_NEW_PROJECT_CHANNEL_ID = '1485086423882268843';
+const THE_RAILYARD_REPO = 'The-Railyard';
+const THE_RAILYARD_OWNER = 'Subway-Builder-Modded';
 
 function normalizeWebhookPath(pathname) {
   const trimmed = String(pathname || '').trim();
@@ -434,6 +437,95 @@ async function deliverGitHubWebhook(event, payload) {
   return 'discord-webhook';
 }
 
+function countryCodeToFlag(code) {
+  if (!code || code.length !== 2) return '';
+  return [...code.toUpperCase()]
+    .map((c) => String.fromCodePoint(c.charCodeAt(0) + 127397))
+    .join('');
+}
+
+async function fetchFileAtCommit(owner, repo, filePath, sha) {
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}?ref=${sha}`;
+  const response = await fetch(url, { headers: githubHeaders() });
+  if (!response.ok) return null;
+  const data = await response.json();
+  if (data.encoding === 'base64' && data.content) {
+    return Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+  }
+  return null;
+}
+
+function buildNewProjectEmbed(manifest, type, projectName) {
+  const name = manifest.name || projectName;
+  const author = Array.isArray(manifest.author)
+    ? manifest.author.join(', ')
+    : manifest.author || 'Unknown';
+  const description = manifest.description || '';
+  const isMap = type === 'map';
+
+  const embed = new EmbedBuilder()
+    .setColor(isMap ? 0x3b82f6 : 0x10b981)
+    .setTitle(`${isMap ? '🗺️ New Map' : '🔧 New Mod'}: ${name}`)
+    .setFooter({ text: 'The Railyard' })
+    .setTimestamp();
+
+  const fields = [{ name: 'Author', value: author, inline: true }];
+
+  if (isMap && manifest.country) {
+    const flag = countryCodeToFlag(manifest.country);
+    const flagText = flag ? `${flag} ${manifest.country.toUpperCase()}` : manifest.country;
+    fields.push({ name: 'Country', value: flagText, inline: true });
+  }
+
+  if (description) {
+    fields.push({ name: 'Description', value: truncate(description, 1024), inline: false });
+  }
+
+  embed.addFields(fields);
+  return embed;
+}
+
+async function handleRailyardNewProjectPush(payload) {
+  if (payload.ref !== 'refs/heads/main') return;
+  if (payload.repository?.name !== THE_RAILYARD_REPO) return;
+
+  const pusherName = (payload.pusher?.name || '').toLowerCase();
+  if (!pusherName.includes('github-actions')) return;
+
+  const channel = await client.channels.fetch(RAILYARD_NEW_PROJECT_CHANNEL_ID);
+  if (!channel || !channel.isTextBased()) return;
+
+  for (const commit of payload.commits || []) {
+    const message = commit.message || '';
+    if (!message.toLowerCase().startsWith('feat')) continue;
+
+    for (const addedFile of commit.added || []) {
+      const mapMatch = addedFile.match(/^maps\/([^/]+)\/manifest\.json$/);
+      const modMatch = addedFile.match(/^mods\/([^/]+)\/manifest\.json$/);
+      const match = mapMatch || modMatch;
+      if (!match) continue;
+
+      const type = mapMatch ? 'map' : 'mod';
+      const projectName = match[1];
+
+      const raw = await fetchFileAtCommit(THE_RAILYARD_OWNER, THE_RAILYARD_REPO, addedFile, commit.id);
+      if (!raw) continue;
+
+      let manifest;
+      try {
+        manifest = JSON.parse(raw);
+      } catch {
+        console.warn('[railyard-push] failed to parse manifest', { file: addedFile });
+        continue;
+      }
+
+      const embed = buildNewProjectEmbed(manifest, type, projectName);
+      await channel.send({ embeds: [embed] });
+      console.log('[railyard-push] announced new project', { type, projectName });
+    }
+  }
+}
+
 async function handleGitHubWebhookRequest(req, res) {
   const deliveryHeader = req.headers['x-github-delivery'];
   const eventHeader = req.headers['x-github-event'];
@@ -477,6 +569,12 @@ async function handleGitHubWebhookRequest(req, res) {
     console.warn('[webhook] bot not ready', { deliveryId, event });
     writePlainResponse(res, 503, 'Bot not ready');
     return;
+  }
+
+  if (event === 'push') {
+    handleRailyardNewProjectPush(payload).catch((error) => {
+      console.error('[railyard-push] failed', { deliveryId, error: error.message });
+    });
   }
 
   try {
