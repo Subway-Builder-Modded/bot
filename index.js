@@ -92,7 +92,7 @@ const PROJECTS = {
 };
 
 const RAILYARD_RELEASE_FORUM = 'railyard-changelog-qe';
-const RAILYARD_NEW_PROJECT_CHANNEL_ID = '1485086423882268843';
+const RAILYARD_NEW_PROJECT_CHANNEL_ID = '1476290379136630894';
 const THE_RAILYARD_REPO = 'The-Railyard';
 const THE_RAILYARD_OWNER = 'Subway-Builder-Modded';
 
