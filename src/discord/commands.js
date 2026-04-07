@@ -113,6 +113,11 @@ async function registerSlashCommands(config) {
     .setDescription('Post server setup embeds to rules, links, support, and feature channels')
     .setDMPermission(false);
 
+  const generateReportsCommand = new SlashCommandBuilder()
+    .setName('generatereports')
+    .setDescription('Generate GitHub issue report embeds in #github-reports and reset the 24h timer')
+    .setDMPermission(false);
+
   const rest = new REST({ version: '10' }).setToken(config.token);
 
   await rest.put(
@@ -127,6 +132,7 @@ async function registerSlashCommands(config) {
         setFeatureTicketCommand.toJSON(),
         resetFeatureTicketCommand.toJSON(),
         setupCommand.toJSON(),
+        generateReportsCommand.toJSON(),
       ],
     }
   );

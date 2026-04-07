@@ -3,7 +3,19 @@ const { buildGitHubWebhookEmbed, buildGitHubWebhookPayload } = require('../disco
 const { normalizeWebhookPath, readRequestBody, writePlainResponse } = require('./request');
 const { verifyGitHubSignature } = require('../utils/security');
 
+const BLOCKED_GITHUB_WEBHOOK_REPOSITORIES = new Set(['subway-builder-modded/regitsry']);
+
 function createWebhookServer(client, config, railyardService) {
+  function getRepositoryFullName(payload) {
+    const fullName = payload?.repository?.full_name;
+    return typeof fullName === 'string' ? fullName.trim().toLowerCase() : '';
+  }
+
+  function isBlockedWebhookRepository(payload) {
+    const fullName = getRepositoryFullName(payload);
+    return fullName ? BLOCKED_GITHUB_WEBHOOK_REPOSITORIES.has(fullName) : false;
+  }
+
   async function sendGitHubWebhookViaDiscordWebhook(event, payload) {
     if (!config.discordWebhookUrl) {
       throw new Error('Missing DISCORD_WEBHOOK_URL.');
@@ -94,6 +106,16 @@ function createWebhookServer(client, config, railyardService) {
     if (event === 'ping') {
       console.log('[webhook] ping acknowledged', { deliveryId });
       writePlainResponse(res, 200, 'pong');
+      return;
+    }
+
+    if (isBlockedWebhookRepository(payload)) {
+      console.log('[webhook] skipped blocked repository event', {
+        deliveryId,
+        event,
+        repository: payload.repository?.full_name || 'unknown',
+      });
+      writePlainResponse(res, 200, 'ok');
       return;
     }
 

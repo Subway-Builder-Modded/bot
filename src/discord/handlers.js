@@ -5,8 +5,9 @@ const {
   SUPPORT_CHANNEL_ID,
 } = require('../constants');
 const { stripCodeBlocks } = require('../utils/text');
+const { memberHasAdminRole } = require('./permissions');
 
-function createInteractionHandler(forumService, setupService, supportService, featureService) {
+function createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService) {
   const commandNames = new Set([
     'pr',
     'support',
@@ -16,6 +17,7 @@ function createInteractionHandler(forumService, setupService, supportService, fe
     'setfeatureticket',
     'resetfeatureticket',
     'setup',
+    'generatereports',
   ]);
 
   return async function onInteractionCreate(interaction) {
@@ -29,6 +31,25 @@ function createInteractionHandler(forumService, setupService, supportService, fe
         const lines = await setupService.runSetup(interaction);
         await interaction.editReply({
           content: lines.join('\n'),
+        });
+        return;
+      }
+
+      if (interaction.commandName === 'generatereports') {
+        const isAdmin = await memberHasAdminRole(interaction);
+        if (!isAdmin) {
+          throw new Error('Only members with the admin role can use /generatereports.');
+        }
+
+        const result = await githubReportService.generateReports({
+          trigger: 'slash-command',
+          resetTimer: true,
+        });
+
+        const failedCount = Array.isArray(result.failedRepos) ? result.failedRepos.length : 0;
+        const failureSummary = failedCount > 0 ? ` (${failedCount} repo(s) failed)` : '';
+        await interaction.editReply({
+          content: `Posted 1 GitHub report embed in <#${result.channelId}> for ${result.sentCount}/${result.attemptedRepos} repos${failureSummary}. The next automatic run is in 24 hours.`,
         });
         return;
       }
@@ -194,7 +215,7 @@ function createMessageHandler(githubService, forumService, embedService) {
   };
 }
 
-function createReadyHandler(config, registerSlashCommands) {
+function createReadyHandler(config, registerSlashCommands, githubReportService) {
   return async function onReady(client) {
     console.log(`Logged in as ${client.user.tag}`);
     console.log('GitHub config:', {
@@ -209,6 +230,13 @@ function createReadyHandler(config, registerSlashCommands) {
       console.log('Slash commands registered.');
     } catch (error) {
       console.error('Failed to register slash commands:', error);
+    }
+
+    try {
+      await githubReportService.startDailyReports();
+      console.log('GitHub daily reports started.');
+    } catch (error) {
+      console.error('Failed to start GitHub daily reports:', error);
     }
   };
 }

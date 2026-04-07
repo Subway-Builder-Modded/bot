@@ -399,6 +399,84 @@ function buildGitHubWebhookPayload(config, event, payload) {
   };
 }
 
+function normalizeRepositoryDisplayName(repo) {
+  return String(repo || 'Unknown Repo')
+    .trim()
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+function pickFirst(items) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  return items[0];
+}
+
+function formatRef(item, fallback) {
+  if (!item) return fallback;
+
+  const issueNumber = Number(item?.number);
+  const linkText = Number.isFinite(issueNumber) ? `#${issueNumber}` : '#?';
+  const linked = item?.htmlUrl ? `[${linkText}](${item.htmlUrl})` : linkText;
+  return linked;
+}
+
+function buildRepositoryReportFieldValue(owner, repo, report) {
+  const issuesUrl = `https://github.com/${owner}/${repo}/issues`;
+  const stalePr = formatRef(pickFirst(report.stalePullRequests), 'none');
+  const staleIssue = formatRef(pickFirst(report.staleIssues), 'none');
+  const latestPr = formatRef(pickFirst(report.latestPullRequests), 'none');
+  const latestIssue = formatRef(pickFirst(report.latestIssues), 'none');
+
+  const lines = [
+    `[Open Issues](${issuesUrl})`,
+    `Issues: ${report.openIssues}`,
+    `PRs: ${report.openPullRequests} (${report.readyForReviewPullRequests} ready / ${report.draftPullRequests} draft)`,
+    `Stale: PR ${stalePr} | Issue ${staleIssue}`,
+    `Latest: PR ${latestPr} | Issue ${latestIssue}`,
+  ];
+
+  return truncateWebhookText(lines.join('\n'), 1024);
+}
+
+function buildGitHubOrganizationReportEmbed(owner, repoReports, options = {}) {
+  const generatedAt = options.generatedAt instanceof Date ? options.generatedAt : new Date();
+  const safeRepoReports = Array.isArray(repoReports) ? repoReports : [];
+  const maxRepoFields = 24;
+  const visibleRepoReports = safeRepoReports.slice(0, maxRepoFields);
+  const hiddenCount = safeRepoReports.length - visibleRepoReports.length;
+
+  const fields = visibleRepoReports.map(({ repo, report }) => ({
+    name: `${normalizeRepositoryDisplayName(repo)} Issue Report`,
+    value: buildRepositoryReportFieldValue(owner, repo, report),
+    inline: false,
+  }));
+
+  if (hiddenCount > 0) {
+    fields.push({
+      name: 'More Repositories',
+      value: `+${hiddenCount} more repositories were omitted due to Discord embed field limits.`,
+      inline: false,
+    });
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x60a5fa)
+    .setTitle('Subway Builder Modded Issue Report')
+    .setURL(`https://github.com/${owner}`)
+    .setThumbnail(`https://github.com/${owner}.png`)
+    .setDescription(`Daily issue report across ${safeRepoReports.length} repositories.`)
+    .setFooter({ text: `Generated ${generatedAt.toLocaleString('en-US')}` })
+    .setTimestamp(generatedAt);
+
+  if (fields.length > 0) {
+    embed.addFields(fields);
+  }
+
+  return embed;
+}
+
 function buildSetupRulesEmbed() {
   return new EmbedBuilder()
     .setColor(0x2563eb)
@@ -551,6 +629,7 @@ module.exports = {
   buildForumPostTitle,
   buildGitHubWebhookEmbed,
   buildGitHubWebhookPayload,
+  buildGitHubOrganizationReportEmbed,
   buildIssueEmbed,
   buildNewProjectEmbed,
   buildSetupFeatureRequestsEmbed,

@@ -14,6 +14,7 @@ const { createSetupService } = require('./src/discord/setupService');
 const { createSupportService } = require('./src/discord/supportService');
 const { createRailyardService } = require('./src/railyard/service');
 const { createWebhookServer } = require('./src/http/webhookServer');
+const { createGitHubReportService } = require('./src/discord/githubReportService');
 
 try {
   validateRequiredConfig();
@@ -37,11 +38,12 @@ const setupService = createSetupService(embedService);
 const supportService = createSupportService();
 const featureService = createFeatureService();
 const railyardService = createRailyardService(client, githubService, embedService);
+const githubReportService = createGitHubReportService(client, config, githubService, embedService);
 const webhookServer = createWebhookServer(client, config, railyardService);
-const readyHandler = createReadyHandler(config, registerSlashCommands);
+const readyHandler = createReadyHandler(config, registerSlashCommands, githubReportService);
 
 client.once('ready', () => readyHandler(client));
-client.on('interactionCreate', createInteractionHandler(forumService, setupService, supportService, featureService));
+client.on('interactionCreate', createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService));
 client.on('messageCreate', createMessageHandler(githubService, forumService, embedService));
 
 webhookServer.startHttpServer();

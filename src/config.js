@@ -11,6 +11,7 @@ const config = {
   githubWebhookSecret: (process.env.GITHUB_WEBHOOK_SECRET || '').trim(),
   githubWebhookPath: (process.env.GITHUB_WEBHOOK_PATH || '/github/webhook').trim() || '/github/webhook',
   discordGitHubEventsChannelId: (process.env.DISCORD_GITHUB_EVENTS_CHANNEL_ID || '').trim(),
+  discordGitHubReportsChannelId: (process.env.DISCORD_GITHUB_REPORTS_CHANNEL_ID || '').trim(),
   discordWebhookUrl: (process.env.DISCORD_WEBHOOK_URL || '').trim(),
   discordUsername: (process.env.DISCORD_USERNAME || '').trim(),
   discordAvatarUrl: (process.env.DISCORD_AVATAR_URL || '').trim(),

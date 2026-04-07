@@ -20,6 +20,62 @@ function createGitHubService(config) {
     return headers;
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getRateLimitDelayMs(response) {
+    const retryAfterRaw = response.headers.get('retry-after');
+    const retryAfter = Number(retryAfterRaw);
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+
+    const remainingRaw = response.headers.get('x-ratelimit-remaining');
+    const resetRaw = response.headers.get('x-ratelimit-reset');
+    const remaining = Number(remainingRaw);
+    const resetUnixSeconds = Number(resetRaw);
+    if (remaining === 0 && Number.isFinite(resetUnixSeconds)) {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      return Math.max(0, (resetUnixSeconds - nowSeconds + 1) * 1000);
+    }
+
+    return null;
+  }
+
+  async function githubGetJson(url) {
+    const maxAttempts = 3;
+    let attempt = 0;
+
+    while (attempt < maxAttempts) {
+      attempt += 1;
+      const response = await fetch(url, { headers: githubHeaders() });
+
+      if (response.ok) {
+        return response.json();
+      }
+
+      const delayMs = getRateLimitDelayMs(response);
+      if ((response.status === 403 || response.status === 429) && delayMs !== null && attempt < maxAttempts) {
+        console.warn('GitHub rate limit hit, waiting before retrying request.', {
+          url,
+          attempt,
+          maxAttempts,
+          delayMs,
+          remaining: response.headers.get('x-ratelimit-remaining'),
+          reset: response.headers.get('x-ratelimit-reset'),
+        });
+        await sleep(delayMs);
+        continue;
+      }
+
+      const body = await response.text();
+      throw new Error(`GitHub API error: ${response.status} ${body}`);
+    }
+
+    throw new Error('GitHub API request failed after retries.');
+  }
+
   function isValidRepoName(value) {
     return /^[A-Za-z0-9_.-]+$/.test(value);
   }
@@ -278,13 +334,7 @@ function createGitHubService(config) {
 
     while (page <= 10) {
       const url = `https://api.github.com/orgs/${owner}/repos?per_page=100&page=${page}&type=all`;
-      const response = await fetch(url, { headers: githubHeaders() });
-
-      if (!response.ok) {
-        throw new Error(`GitHub org repos API error: ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await githubGetJson(url);
       if (!Array.isArray(data) || data.length === 0) break;
 
       for (const repo of data) {
@@ -301,6 +351,75 @@ function createGitHubService(config) {
     }
 
     return repos;
+  }
+
+  async function searchIssues(query, options = {}) {
+    const url = new URL('https://api.github.com/search/issues');
+    url.searchParams.set('q', query);
+
+    if (options.sort) {
+      url.searchParams.set('sort', options.sort);
+    }
+    if (options.order) {
+      url.searchParams.set('order', options.order);
+    }
+
+    url.searchParams.set('per_page', String(options.perPage || 3));
+    url.searchParams.set('page', String(options.page || 1));
+
+    const data = await githubGetJson(url.toString());
+    return {
+      totalCount: Number(data?.total_count || 0),
+      items: Array.isArray(data?.items) ? data.items : [],
+    };
+  }
+
+  function mapIssueListItem(item) {
+    return {
+      number: item.number,
+      title: item.title || 'Untitled',
+      htmlUrl: item.html_url || null,
+      createdAt: item.created_at || null,
+      updatedAt: item.updated_at || null,
+      draft: !!item.draft,
+    };
+  }
+
+  async function fetchRepositoryIssueReport(owner, repo, options = {}) {
+    const limit = Number(options.limit) > 0 ? Number(options.limit) : 3;
+    const baseQuery = `repo:${owner}/${repo} is:open`;
+
+    const [
+      issueCount,
+      pullRequestCount,
+      draftPullRequestCount,
+      stalePullRequests,
+      staleIssues,
+      latestPullRequests,
+      latestIssues,
+    ] = await Promise.all([
+      searchIssues(`${baseQuery} is:issue`, { perPage: 1 }),
+      searchIssues(`${baseQuery} is:pr`, { perPage: 1 }),
+      searchIssues(`${baseQuery} is:pr draft:true`, { perPage: 1 }),
+      searchIssues(`${baseQuery} is:pr`, { sort: 'updated', order: 'asc', perPage: limit }),
+      searchIssues(`${baseQuery} is:issue`, { sort: 'updated', order: 'asc', perPage: limit }),
+      searchIssues(`${baseQuery} is:pr`, { sort: 'created', order: 'desc', perPage: limit }),
+      searchIssues(`${baseQuery} is:issue`, { sort: 'created', order: 'desc', perPage: limit }),
+    ]);
+
+    const openPullRequests = pullRequestCount.totalCount;
+    const draftPullRequests = Math.min(draftPullRequestCount.totalCount, openPullRequests);
+
+    return {
+      openIssues: issueCount.totalCount,
+      openPullRequests,
+      draftPullRequests,
+      readyForReviewPullRequests: Math.max(openPullRequests - draftPullRequests, 0),
+      stalePullRequests: stalePullRequests.items.map(mapIssueListItem),
+      staleIssues: staleIssues.items.map(mapIssueListItem),
+      latestPullRequests: latestPullRequests.items.map(mapIssueListItem),
+      latestIssues: latestIssues.items.map(mapIssueListItem),
+    };
   }
 
   async function resolveCommitRef(commitRef) {
@@ -360,6 +479,8 @@ function createGitHubService(config) {
     fetchFileAtCommit,
     fetchGitHubIssue,
     fetchGitHubPullRequest,
+    fetchRepositoryIssueReport,
+    listOrgRepos,
     normalizeIssueNumber,
     resolveCommitRef,
   };
