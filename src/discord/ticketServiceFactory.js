@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { ChannelType, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const { truncate } = require('../utils/text');
-const { memberHasAdminRole } = require('./permissions');
+const { memberHasModRole } = require('./permissions');
 
 const THREAD_NAME_MAX_LENGTH = 100;
 
@@ -145,9 +145,9 @@ function createTicketService(options) {
   }
 
   async function setNextTicketNumber(interaction, ticketNumberRaw) {
-    const isAdmin = await memberHasAdminRole(interaction);
-    if (!isAdmin) {
-      throw new Error(`Only members with the admin role can use /${setCommandName}.`);
+    const isMod = await memberHasModRole(interaction);
+    if (!isMod) {
+      throw new Error(`Only members with the mod role can use /${setCommandName}.`);
     }
 
     const ticketNumber = Number(ticketNumberRaw);
@@ -164,9 +164,9 @@ function createTicketService(options) {
   }
 
   async function resetTicketNumber(interaction) {
-    const isAdmin = await memberHasAdminRole(interaction);
-    if (!isAdmin) {
-      throw new Error(`Only members with the admin role can use /${resetCommandName}.`);
+    const isMod = await memberHasModRole(interaction);
+    if (!isMod) {
+      throw new Error(`Only members with the mod role can use /${resetCommandName}.`);
     }
 
     return queueExclusive(async () => {

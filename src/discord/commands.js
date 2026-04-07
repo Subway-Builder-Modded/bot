@@ -76,7 +76,7 @@ async function registerSlashCommands(config) {
 
   const setSupportTicketCommand = new SlashCommandBuilder()
     .setName('setsupportticket')
-    .setDescription('Set the next support ticket number (admin only)')
+    .setDescription('Set the next support ticket number (mod only)')
     .setDMPermission(false)
     .addIntegerOption((option) =>
       option
@@ -88,12 +88,12 @@ async function registerSlashCommands(config) {
 
   const resetSupportTicketCommand = new SlashCommandBuilder()
     .setName('resetsupportticket')
-    .setDescription('Reset the next support ticket number to 1 (admin only)')
+    .setDescription('Reset the next support ticket number to 1 (mod only)')
     .setDMPermission(false);
 
   const setFeatureTicketCommand = new SlashCommandBuilder()
     .setName('setfeatureticket')
-    .setDescription('Set the next feature ticket number (admin only)')
+    .setDescription('Set the next feature ticket number (mod only)')
     .setDMPermission(false)
     .addIntegerOption((option) =>
       option
@@ -105,7 +105,7 @@ async function registerSlashCommands(config) {
 
   const resetFeatureTicketCommand = new SlashCommandBuilder()
     .setName('resetfeatureticket')
-    .setDescription('Reset the next feature ticket number to 1 (admin only)')
+    .setDescription('Reset the next feature ticket number to 1 (mod only)')
     .setDMPermission(false);
 
   const setupCommand = new SlashCommandBuilder()
@@ -115,7 +115,7 @@ async function registerSlashCommands(config) {
 
   const generateReportsCommand = new SlashCommandBuilder()
     .setName('generatereports')
-    .setDescription('Generate GitHub issue report embeds in #github-reports and reset the 24h timer')
+    .setDescription('Generate GitHub issue report embeds in #github-reports and reset the 24h timer (mod only)')
     .setDMPermission(false);
 
   const rest = new REST({ version: '10' }).setToken(config.token);

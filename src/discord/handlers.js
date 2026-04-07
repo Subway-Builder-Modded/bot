@@ -2,10 +2,11 @@ const {
   EXACT_IMAGE_RESPONSES,
   EXACT_TEXT_RESPONSES,
   FEATURE_REQUESTS_CHANNEL_ID,
+  MOD_ROLE_ID,
   SUPPORT_CHANNEL_ID,
 } = require('../constants');
 const { stripCodeBlocks } = require('../utils/text');
-const { memberHasAdminRole } = require('./permissions');
+const { memberHasModRole } = require('./permissions');
 
 function createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService) {
   const commandNames = new Set([
@@ -36,9 +37,9 @@ function createInteractionHandler(forumService, setupService, supportService, fe
       }
 
       if (interaction.commandName === 'generatereports') {
-        const isAdmin = await memberHasAdminRole(interaction);
-        if (!isAdmin) {
-          throw new Error('Only members with the admin role can use /generatereports.');
+        const isMod = await memberHasModRole(interaction);
+        if (!isMod) {
+          throw new Error('Only members with the mod role can use /generatereports.');
         }
 
         const result = await githubReportService.generateReports({
@@ -142,11 +143,32 @@ function createMessageHandler(githubService, forumService, embedService) {
   const recentReplies = new Set();
   const autoDeleteChannelIds = new Set([SUPPORT_CHANNEL_ID, FEATURE_REQUESTS_CHANNEL_ID]);
 
+  async function memberHasModRole(message) {
+    const cachedMember = message.member;
+    if (cachedMember?.roles?.cache?.has?.(MOD_ROLE_ID)) {
+      return true;
+    }
+
+    if (!message.guild || !message.author?.id) {
+      return false;
+    }
+
+    try {
+      const freshMember = await message.guild.members.fetch(message.author.id);
+      return freshMember.roles.cache.has(MOD_ROLE_ID);
+    } catch {
+      return false;
+    }
+  }
+
   return async function onMessageCreate(message) {
     try {
       if (!message.guild) return;
 
       if (autoDeleteChannelIds.has(message.channelId) && !message.channel?.isThread?.()) {
+        const isMod = await memberHasModRole(message);
+        if (isMod) return;
+
         setTimeout(() => {
           message.delete().catch(() => {});
         }, 5000);

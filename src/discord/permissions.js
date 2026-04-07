@@ -1,4 +1,4 @@
-const { ADMIN_ROLE_ID } = require('../constants');
+const { MOD_ROLE_ID } = require('../constants');
 
 async function memberHasRole(interaction, roleId) {
   if (!interaction.guild) return false;
@@ -12,11 +12,11 @@ async function memberHasRole(interaction, roleId) {
   return freshMember.roles.cache.has(roleId);
 }
 
-async function memberHasAdminRole(interaction) {
-  return memberHasRole(interaction, ADMIN_ROLE_ID);
+async function memberHasModRole(interaction) {
+  return memberHasRole(interaction, MOD_ROLE_ID);
 }
 
 module.exports = {
-  memberHasAdminRole,
+  memberHasModRole,
   memberHasRole,
 };

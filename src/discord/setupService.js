@@ -4,7 +4,7 @@ const {
   RULES_CHANNEL_ID,
   SUPPORT_CHANNEL_ID,
 } = require('../constants');
-const { memberHasAdminRole } = require('./permissions');
+const { memberHasModRole } = require('./permissions');
 
 function createSetupService(embedService) {
   async function requireTextChannel(guild, channelId, label) {
@@ -16,9 +16,9 @@ function createSetupService(embedService) {
   }
 
   async function runSetup(interaction) {
-    const authorized = await memberHasAdminRole(interaction);
+    const authorized = await memberHasModRole(interaction);
     if (!authorized) {
-      throw new Error('Only members with the admin role can use /setup.');
+      throw new Error('Only members with the mod role can use /setup.');
     }
 
     const rulesChannel = await requireTextChannel(interaction.guild, RULES_CHANNEL_ID, 'Rules');
