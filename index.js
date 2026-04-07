@@ -16,10 +16,28 @@ const { createRailyardService } = require('./src/railyard/service');
 const { createWebhookServer } = require('./src/http/webhookServer');
 const { createGitHubReportService } = require('./src/discord/githubReportService');
 
+function bootLog(message, extra) {
+  if (extra) {
+    console.log(`[boot] ${message}`, extra);
+    return;
+  }
+  console.log(`[boot] ${message}`);
+}
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[process] uncaughtException', error);
+});
+
 try {
+  bootLog('Validating required config...');
   validateRequiredConfig();
+  bootLog('Required config validated.');
 } catch (error) {
-  console.error(error.message);
+  console.error('[boot] Config validation failed:', error.message);
   process.exit(1);
 }
 
@@ -42,9 +60,22 @@ const githubReportService = createGitHubReportService(client, config, githubServ
 const webhookServer = createWebhookServer(client, config, railyardService);
 const readyHandler = createReadyHandler(config, registerSlashCommands, githubReportService);
 
+client.on('error', (error) => {
+  console.error('[discord] client error', error);
+});
+
+client.on('shardError', (error) => {
+  console.error('[discord] shard error', error);
+});
+
 client.once('ready', () => readyHandler(client));
 client.on('interactionCreate', createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService));
 client.on('messageCreate', createMessageHandler(githubService, forumService, embedService));
 
+bootLog('Starting HTTP webhook server...', { port: config.port, webhookPath: config.githubWebhookPath });
 webhookServer.startHttpServer();
-client.login(config.token);
+bootLog('Logging in to Discord...');
+client.login(config.token).catch((error) => {
+  console.error('[discord] login failed', error);
+  process.exit(1);
+});

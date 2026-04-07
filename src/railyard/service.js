@@ -1,13 +1,13 @@
 const {
   RAILYARD_NEW_PROJECT_CHANNEL_ID,
   THE_RAILYARD_OWNER,
-  THE_RAILYARD_REPO,
+  REGISTRY_REPO,
 } = require('../constants');
 
 function createRailyardService(client, githubService, embedService) {
   async function handleRailyardNewProjectPush(payload) {
     if (payload.ref !== 'refs/heads/main') return;
-    if (payload.repository?.name !== THE_RAILYARD_REPO) return;
+    if (payload.repository?.name !== REGISTRY_REPO) return;
 
     const pusherName = (payload.pusher?.name || '').toLowerCase();
     if (!pusherName.includes('github-actions')) return;
@@ -28,7 +28,7 @@ function createRailyardService(client, githubService, embedService) {
         const type = mapMatch ? 'map' : 'mod';
         const projectName = match[1];
 
-        const raw = await githubService.fetchFileAtCommit(THE_RAILYARD_OWNER, THE_RAILYARD_REPO, addedFile, commit.id);
+        const raw = await githubService.fetchFileAtCommit(THE_RAILYARD_OWNER, REGISTRY_REPO, addedFile, commit.id);
         if (!raw) continue;
 
         let manifest;

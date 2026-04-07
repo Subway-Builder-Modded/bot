@@ -4,14 +4,14 @@ const { normalizeWebhookPath, readRequestBody, writePlainResponse } = require('.
 const { verifyGitHubSignature } = require('../utils/security');
 
 function createWebhookServer(client, config, railyardService) {
-  function getWebhookItemTitle(payload) {
-    if (typeof payload?.pull_request?.title === 'string') {
+  function getWebhookItemTitle(event, payload) {
+    if (event === 'pull_request' && typeof payload?.pull_request?.title === 'string') {
       return payload.pull_request.title;
     }
-    if (typeof payload?.issue?.title === 'string') {
+    if (event === 'issues' && typeof payload?.issue?.title === 'string') {
       return payload.issue.title;
     }
-    return '';
+    return null;
   }
 
   function isChorePrefixedTitle(title) {
@@ -19,20 +19,8 @@ function createWebhookServer(client, config, railyardService) {
   }
 
   function shouldSkipWebhookEvent(event, payload) {
-    const title = getWebhookItemTitle(payload);
-    if (!title) return false;
-
-    const issueLikeEvents = new Set([
-      'issues',
-      'issue_comment',
-      'pull_request',
-      'pull_request_review',
-      'pull_request_review_comment',
-      'pull_request_review_thread',
-    ]);
-
-    if (!issueLikeEvents.has(event)) return false;
-    return isChorePrefixedTitle(title);
+    const title = getWebhookItemTitle(event, payload);
+    return typeof title === 'string' && isChorePrefixedTitle(title);
   }
 
   async function sendGitHubWebhookViaDiscordWebhook(event, payload) {
@@ -133,15 +121,9 @@ function createWebhookServer(client, config, railyardService) {
         deliveryId,
         event,
         repository: payload.repository?.full_name || 'unknown',
-        title: getWebhookItemTitle(payload),
+        title: getWebhookItemTitle(event, payload),
       });
       writePlainResponse(res, 200, 'ok');
-      return;
-    }
-
-    if (!client.isReady()) {
-      console.warn('[webhook] bot not ready', { deliveryId, event });
-      writePlainResponse(res, 503, 'Bot not ready');
       return;
     }
 
