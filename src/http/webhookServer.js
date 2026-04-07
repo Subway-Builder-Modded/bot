@@ -3,17 +3,36 @@ const { buildGitHubWebhookEmbed, buildGitHubWebhookPayload } = require('../disco
 const { normalizeWebhookPath, readRequestBody, writePlainResponse } = require('./request');
 const { verifyGitHubSignature } = require('../utils/security');
 
-const BLOCKED_GITHUB_WEBHOOK_REPOSITORIES = new Set(['subway-builder-modded/regitsry']);
-
 function createWebhookServer(client, config, railyardService) {
-  function getRepositoryFullName(payload) {
-    const fullName = payload?.repository?.full_name;
-    return typeof fullName === 'string' ? fullName.trim().toLowerCase() : '';
+  function getWebhookItemTitle(payload) {
+    if (typeof payload?.pull_request?.title === 'string') {
+      return payload.pull_request.title;
+    }
+    if (typeof payload?.issue?.title === 'string') {
+      return payload.issue.title;
+    }
+    return '';
   }
 
-  function isBlockedWebhookRepository(payload) {
-    const fullName = getRepositoryFullName(payload);
-    return fullName ? BLOCKED_GITHUB_WEBHOOK_REPOSITORIES.has(fullName) : false;
+  function isChorePrefixedTitle(title) {
+    return /^\s*chore\s*:/i.test(String(title || ''));
+  }
+
+  function shouldSkipWebhookEvent(event, payload) {
+    const title = getWebhookItemTitle(payload);
+    if (!title) return false;
+
+    const issueLikeEvents = new Set([
+      'issues',
+      'issue_comment',
+      'pull_request',
+      'pull_request_review',
+      'pull_request_review_comment',
+      'pull_request_review_thread',
+    ]);
+
+    if (!issueLikeEvents.has(event)) return false;
+    return isChorePrefixedTitle(title);
   }
 
   async function sendGitHubWebhookViaDiscordWebhook(event, payload) {
@@ -109,11 +128,12 @@ function createWebhookServer(client, config, railyardService) {
       return;
     }
 
-    if (isBlockedWebhookRepository(payload)) {
-      console.log('[webhook] skipped blocked repository event', {
+    if (shouldSkipWebhookEvent(event, payload)) {
+      console.log('[webhook] skipped chore-prefixed issue/pr event', {
         deliveryId,
         event,
         repository: payload.repository?.full_name || 'unknown',
+        title: getWebhookItemTitle(payload),
       });
       writePlainResponse(res, 200, 'ok');
       return;
