@@ -4,13 +4,27 @@ const { normalizeWebhookPath, readRequestBody, writePlainResponse } = require('.
 const { verifyGitHubSignature } = require('../utils/security');
 
 function createWebhookServer(client, config, railyardService) {
-  function getWebhookItemTitle(event, payload) {
-    if (event === 'pull_request' && typeof payload?.pull_request?.title === 'string') {
+  function getPullRequestTitle(payload) {
+    if (typeof payload?.pull_request?.title === 'string') {
       return payload.pull_request.title;
     }
+    return null;
+  }
+
+  function getWebhookItemTitle(event, payload) {
+    if (
+      event === 'pull_request' ||
+      event === 'pull_request_review' ||
+      event === 'pull_request_review_comment' ||
+      event === 'pull_request_review_thread'
+    ) {
+      return getPullRequestTitle(payload);
+    }
+
     if (event === 'issues' && typeof payload?.issue?.title === 'string') {
       return payload.issue.title;
     }
+
     return null;
   }
 
