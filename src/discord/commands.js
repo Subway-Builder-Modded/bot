@@ -1,5 +1,4 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { PROJECTS } = require('../constants');
 
 const TICKET_SERVICE_CHOICES = [
   { name: 'Railyard', value: 'Railyard' },
@@ -9,33 +8,6 @@ const TICKET_SERVICE_CHOICES = [
 ];
 
 async function registerSlashCommands(config) {
-  const prCommand = new SlashCommandBuilder()
-    .setName('pr')
-    .setDescription('Create an issue/PR discussion forum post')
-    .setDMPermission(false)
-    .addStringOption((option) =>
-      option
-        .setName('project')
-        .setDescription('Project to create the post for')
-        .setRequired(true)
-        .addChoices(
-          ...Object.keys(PROJECTS).map((key) => ({ name: key, value: key }))
-        )
-    )
-    .addIntegerOption((option) =>
-      option
-        .setName('issue')
-        .setDescription('Issue or PR number')
-        .setMinValue(1)
-        .setRequired(true)
-    )
-    .addStringOption((option) =>
-      option
-        .setName('message')
-        .setDescription('Message for the forum post (optional)')
-        .setRequired(false)
-    );
-
   const supportCommand = new SlashCommandBuilder()
     .setName('support')
     .setDescription('Create a support ticket thread in #support')
@@ -113,10 +85,70 @@ async function registerSlashCommands(config) {
     .setDescription('Post server setup embeds to rules, links, support, and feature channels')
     .setDMPermission(false);
 
-  const generateReportsCommand = new SlashCommandBuilder()
-    .setName('generatereports')
-    .setDescription('Generate GitHub issue report embeds in #github-reports and reset the 24h timer (mod only)')
-    .setDMPermission(false);
+  const betatestCommand = new SlashCommandBuilder()
+    .setName('betatest')
+    .setDescription('Manage beta test project channels and roles')
+    .setDMPermission(false)
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('create')
+        .setDescription('Create a beta test project')
+        .addStringOption((option) =>
+          option
+            .setName('id')
+            .setDescription('Project id in kebab-case (used as channel name)')
+            .setRequired(true)
+            .setMaxLength(90)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('add')
+        .setDescription('Add a user to a beta test project by id')
+        .addStringOption((option) =>
+          option
+            .setName('project-id')
+            .setDescription('Project id (channel name)')
+            .setRequired(true)
+            .setMaxLength(90)
+        )
+        .addStringOption((option) =>
+          option
+            .setName('user-id')
+            .setDescription('Discord user id to add to the project')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('remove')
+        .setDescription('Remove a user from a beta test project by id')
+        .addStringOption((option) =>
+          option
+            .setName('project-id')
+            .setDescription('Project id (channel name)')
+            .setRequired(true)
+            .setMaxLength(90)
+        )
+        .addStringOption((option) =>
+          option
+            .setName('user-id')
+            .setDescription('Discord user id to remove from the project')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('delete')
+        .setDescription('Delete a beta test project channel and roles')
+        .addStringOption((option) =>
+          option
+            .setName('id')
+            .setDescription('Project id to delete')
+            .setRequired(true)
+            .setMaxLength(90)
+        )
+    );
 
   const rest = new REST({ version: '10' }).setToken(config.token);
 
@@ -124,7 +156,6 @@ async function registerSlashCommands(config) {
     Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId),
     {
       body: [
-        prCommand.toJSON(),
         supportCommand.toJSON(),
         featureCommand.toJSON(),
         setSupportTicketCommand.toJSON(),
@@ -132,7 +163,7 @@ async function registerSlashCommands(config) {
         setFeatureTicketCommand.toJSON(),
         resetFeatureTicketCommand.toJSON(),
         setupCommand.toJSON(),
-        generateReportsCommand.toJSON(),
+        betatestCommand.toJSON(),
       ],
     }
   );

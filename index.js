@@ -12,9 +12,9 @@ const {
 const { createFeatureService } = require('./src/discord/featureService');
 const { createSetupService } = require('./src/discord/setupService');
 const { createSupportService } = require('./src/discord/supportService');
+const { createBetatestService } = require('./src/discord/betatestService');
 const { createRailyardService } = require('./src/railyard/service');
 const { createWebhookServer } = require('./src/http/webhookServer');
-const { createGitHubReportService } = require('./src/discord/githubReportService');
 
 function bootLog(message, extra) {
   if (extra) {
@@ -55,10 +55,10 @@ const forumService = createForumService(githubService, embedService);
 const setupService = createSetupService(embedService);
 const supportService = createSupportService();
 const featureService = createFeatureService();
+const betatestService = createBetatestService();
 const railyardService = createRailyardService(client, githubService, embedService);
-const githubReportService = createGitHubReportService(client, config, githubService, embedService);
 const webhookServer = createWebhookServer(client, config, railyardService);
-const readyHandler = createReadyHandler(config, registerSlashCommands, githubReportService);
+const readyHandler = createReadyHandler(config, registerSlashCommands);
 
 client.on('error', (error) => {
   console.error('[discord] client error', error);
@@ -69,7 +69,10 @@ client.on('shardError', (error) => {
 });
 
 client.once('ready', () => readyHandler(client));
-client.on('interactionCreate', createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService));
+client.on(
+  'interactionCreate',
+  createInteractionHandler(forumService, setupService, supportService, featureService, betatestService)
+);
 client.on('messageCreate', createMessageHandler(githubService, forumService, embedService));
 
 bootLog('Starting HTTP webhook server...', { port: config.port, webhookPath: config.githubWebhookPath });

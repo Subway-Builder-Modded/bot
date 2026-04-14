@@ -14,29 +14,6 @@ const EXACT_IMAGE_RESPONSES = new Map([
   ['suscat', SUSCAT_IMAGE_URL],
 ]);
 
-const PROJECTS = {
-  railyard: {
-    owner: 'Subway-Builder-Modded',
-    repo: 'railyard',
-    forumName: 'railyard-pr-discussions',
-  },
-  registry: {
-    owner: 'Subway-Builder-Modded',
-    repo: 'The-Railyard',
-    forumName: 'registry-pr-discussions',
-  },
-  website: {
-    owner: 'Subway-Builder-Modded',
-    repo: 'website',
-    forumName: 'website-pr-discussions',
-  },
-  bot: {
-    owner: 'Subway-Builder-Modded',
-    repo: 'bot',
-    forumName: 'bot-pr-discussions',
-  },
-};
-
 const REPO_ALIASES = {
   registry: 'The-Railyard',
 };
@@ -52,6 +29,11 @@ const SUPPORT_ROLE_ID = '1487941024788516956';
 const FEATURE_REQUESTS_CHANNEL_ID = '1487938647935418378';
 const FEATURE_ROLE_ID = '1476290491363627049';
 const MOD_ROLE_ID = '1480812573103231007';
+const MAPPER_ROLE_ID = '1492576363931107518';
+const MODDER_ROLE_ID = '1480973978657882443';
+const COLLABORATOR_ROLE_ID = '1490713792391413841';
+const BETA_TESTING_CATEGORY_ID = '1493579075380318218';
+const BETATEST_CREATE_CHANNEL_ID = '1493586550498267167';
 const GITHUB_REPORTS_CHANNEL_ID = '1491063696229924914';
 
 module.exports = {
@@ -61,8 +43,12 @@ module.exports = {
   FEATURE_REQUESTS_CHANNEL_ID,
   GITHUB_REPORTS_CHANNEL_ID,
   IMPORTANT_LINKS_CHANNEL_ID,
+  BETA_TESTING_CATEGORY_ID,
+  BETATEST_CREATE_CHANNEL_ID,
+  COLLABORATOR_ROLE_ID,
+  MAPPER_ROLE_ID,
   MOD_ROLE_ID,
-  PROJECTS,
+  MODDER_ROLE_ID,
   RAILYARD_NEW_PROJECT_CHANNEL_ID,
   REPO_ALIASES,
   RULES_CHANNEL_ID,

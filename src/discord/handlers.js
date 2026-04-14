@@ -1,16 +1,21 @@
 const {
   EXACT_IMAGE_RESPONSES,
   EXACT_TEXT_RESPONSES,
+  BETATEST_CREATE_CHANNEL_ID,
   FEATURE_REQUESTS_CHANNEL_ID,
   MOD_ROLE_ID,
   SUPPORT_CHANNEL_ID,
 } = require('../constants');
 const { stripCodeBlocks } = require('../utils/text');
-const { memberHasModRole } = require('./permissions');
 
-function createInteractionHandler(forumService, setupService, supportService, featureService, githubReportService) {
+function createInteractionHandler(
+  forumService,
+  setupService,
+  supportService,
+  featureService,
+  betatestService
+) {
   const commandNames = new Set([
-    'pr',
     'support',
     'feature',
     'setsupportticket',
@@ -18,7 +23,7 @@ function createInteractionHandler(forumService, setupService, supportService, fe
     'setfeatureticket',
     'resetfeatureticket',
     'setup',
-    'generatereports',
+    'betatest',
   ]);
 
   return async function onInteractionCreate(interaction) {
@@ -32,40 +37,6 @@ function createInteractionHandler(forumService, setupService, supportService, fe
         const lines = await setupService.runSetup(interaction);
         await interaction.editReply({
           content: lines.join('\n'),
-        });
-        return;
-      }
-
-      if (interaction.commandName === 'generatereports') {
-        const isMod = await memberHasModRole(interaction);
-        if (!isMod) {
-          throw new Error('Only members with the mod role can use /generatereports.');
-        }
-
-        const result = await githubReportService.generateReports({
-          trigger: 'slash-command',
-          resetTimer: true,
-        });
-
-        const failedCount = Array.isArray(result.failedRepos) ? result.failedRepos.length : 0;
-        const failureSummary = failedCount > 0 ? ` (${failedCount} repo(s) failed)` : '';
-        await interaction.editReply({
-          content: `Posted 1 GitHub report embed in <#${result.channelId}> for ${result.sentCount}/${result.attemptedRepos} repos${failureSummary}. The next automatic run is in 24 hours.`,
-        });
-        return;
-      }
-
-      if (interaction.commandName === 'pr') {
-        const projectKey = interaction.options.getString('project', true);
-        const issue = interaction.options.getInteger('issue', true);
-        const message = interaction.options.getString('message', false) ?? '';
-
-        const result = await forumService.createPrDiscussionPost(interaction, projectKey, issue, message);
-
-        await interaction.editReply({
-          content: result.existed
-            ? `Forum post already exists: ${forumService.getThreadUrl(result.thread)}`
-            : `Created forum post: ${forumService.getThreadUrl(result.thread)}`,
         });
         return;
       }
@@ -118,6 +89,57 @@ function createInteractionHandler(forumService, setupService, supportService, fe
         return;
       }
 
+      if (interaction.commandName === 'betatest') {
+        const subcommand = interaction.options.getSubcommand(true);
+
+        if (subcommand === 'create') {
+          const id = interaction.options.getString('id', true);
+          const result = await betatestService.createProject(interaction, id);
+
+          await interaction.editReply({
+            content: [
+              `Created beta test project in <#${result.channel.id}>`,
+              `Admin role: <@&${result.adminRole.id}>`,
+              `Member role: <@&${result.memberRole.id}>`,
+              `You were granted both project roles.`,
+            ].join('\n'),
+          });
+          return;
+        }
+
+        if (subcommand === 'delete') {
+          const id = interaction.options.getString('id', true);
+          await betatestService.deleteProject(interaction, id);
+
+          await interaction.editReply({
+            content: `Deleted beta test project "${id}" and its associated roles.`,
+          });
+          return;
+        }
+
+        if (subcommand === 'add') {
+          const projectId = interaction.options.getString('project-id', true);
+          const userId = interaction.options.getString('user-id', true);
+          const result = await betatestService.addUserToProject(interaction, projectId, userId);
+
+          await interaction.editReply({
+            content: `Added <@${result.targetMember.id}> to <#${result.projectChannel.id}> with role <@&${result.memberRole.id}>.`,
+          });
+          return;
+        }
+
+        if (subcommand === 'remove') {
+          const projectId = interaction.options.getString('project-id', true);
+          const userId = interaction.options.getString('user-id', true);
+          const result = await betatestService.removeUserFromProject(interaction, projectId, userId);
+
+          await interaction.editReply({
+            content: `Removed <@${result.targetMember.id}> from <#${result.projectChannel.id}> by removing role <@&${result.memberRole.id}>.`,
+          });
+          return;
+        }
+      }
+
       const next = await featureService.resetTicketNumber(interaction);
       await interaction.editReply({
         content: `Feature ticket counter reset. Next ticket will be #${next}.`,
@@ -141,7 +163,7 @@ function createInteractionHandler(forumService, setupService, supportService, fe
 
 function createMessageHandler(githubService, forumService, embedService) {
   const recentReplies = new Set();
-  const autoDeleteChannelIds = new Set([SUPPORT_CHANNEL_ID, FEATURE_REQUESTS_CHANNEL_ID]);
+  const autoDeleteChannelIds = new Set([SUPPORT_CHANNEL_ID, FEATURE_REQUESTS_CHANNEL_ID, BETATEST_CREATE_CHANNEL_ID]);
 
   async function memberHasModRole(message) {
     const cachedMember = message.member;
@@ -237,7 +259,7 @@ function createMessageHandler(githubService, forumService, embedService) {
   };
 }
 
-function createReadyHandler(config, registerSlashCommands, githubReportService) {
+function createReadyHandler(config, registerSlashCommands) {
   return async function onReady(client) {
     console.log(`Logged in as ${client.user.tag}`);
     console.log('GitHub config:', {
@@ -252,13 +274,6 @@ function createReadyHandler(config, registerSlashCommands, githubReportService) 
       console.log('Slash commands registered.');
     } catch (error) {
       console.error('Failed to register slash commands:', error);
-    }
-
-    try {
-      await githubReportService.startDailyReports();
-      console.log('GitHub daily reports started.');
-    } catch (error) {
-      console.error('Failed to start GitHub daily reports:', error);
     }
   };
 }
